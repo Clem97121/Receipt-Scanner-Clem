@@ -7,6 +7,7 @@ from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from tasks import process_receipt_task
 
 load_dotenv()
 
@@ -68,6 +69,8 @@ async def handle_photo(message: types.Message):
         )
         blob_client.upload_blob(file_bytes, overwrite=True)
 
+        process_receipt_task.delay(blob_name, message.chat.id)
+
         await message.answer(
             f"✅ Фото успешно загружено в Azure Blob Storage!\n"
             f"• Контейнер: `{AZURE_CONTAINER_NAME}`\n"
@@ -82,7 +85,6 @@ async def handle_photo(message: types.Message):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    # Проверяем наличие контейнера в Azure
     ensure_container_exists()
 
     logging.info("Бот запущен!")

@@ -7,3 +7,22 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    container_name: receipt_worker
+    command: celery -A tasks.celery_app worker --loglevel=info
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: receipt_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
