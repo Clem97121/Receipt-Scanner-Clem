@@ -16,27 +16,29 @@ AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "receipts")
 
 if not BOT_TOKEN:
-    raise ValueError("ОШИБКА: Токен бота не найден! Проверь файл .env")
+    raise ValueError("ERROR: Bot token not found! Check your .env file")
 
 if not AZURE_STORAGE_CONNECTION_STRING:
-    raise ValueError("ОШИБКА: AZURE_STORAGE_CONNECTION_STRING не найден в .env!")
+    raise ValueError("ERROR: AZURE_STORAGE_CONNECTION_STRING not found in .env!")
 
 blob_service_client = BlobServiceClient.from_connection_string(
     AZURE_STORAGE_CONNECTION_STRING
 )
 
+
 def ensure_container_exists():
-    """Проверяем существование контейнера в Azure Blob Storage, если нет — создаем."""
+    """Ensure Azure Blob Storage container exists, create if not."""
     try:
         container_client = blob_service_client.get_container_client(
             AZURE_CONTAINER_NAME
         )
         container_client.create_container()
-        logging.info(f"Контейнер '{AZURE_CONTAINER_NAME}' успешно создан.")
+        logging.info(f"Container '{AZURE_CONTAINER_NAME}' created successfully.")
     except ResourceExistsError:
-        logging.info(f"Контейнер '{AZURE_CONTAINER_NAME}' уже существует.")
+        logging.info(f"Container '{AZURE_CONTAINER_NAME}' already exists.")
     except Exception as e:
-        logging.error(f"Ошибка при создании контейнера: {e}")
+        logging.error(f"Error creating container: {e}")
+
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -45,14 +47,14 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот для учета трат.\n"
-        "Отправь мне фото чека, и я распознаю сумму!"
+        "👋 Hi! I'm an expense tracking bot.\n"
+        "Send me a photo of a receipt, and I'll process it!"
     )
 
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    await message.answer("📥 Скачиваю фото из Telegram...")
+    await message.answer("📥 Downloading photo from Telegram...")
 
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
@@ -72,14 +74,14 @@ async def handle_photo(message: types.Message):
         process_receipt_task.delay(blob_name, message.chat.id)
 
         await message.answer(
-            f"✅ Фото успешно загружено в Azure Blob Storage!\n"
-            f"• Контейнер: `{AZURE_CONTAINER_NAME}`\n"
-            f"• Путь: `{blob_name}`",
+            f"✅ Photo uploaded to Azure Blob Storage successfully!\n"
+            f"• Container: `{AZURE_CONTAINER_NAME}`\n"
+            f"• Path: `{blob_name}`",
             parse_mode="Markdown",
         )
     except Exception as e:
-        logging.error(f"Ошибка загрузки в Azure Blob Storage: {e}")
-        await message.answer("❌ Не удалось сохранить фото в Azure Blob Storage.")
+        logging.error(f"Error uploading to Azure Blob Storage: {e}")
+        await message.answer("❌ Failed to save photo to Azure Blob Storage.")
 
 
 async def main():
@@ -87,7 +89,7 @@ async def main():
 
     ensure_container_exists()
 
-    logging.info("Бот запущен!")
+    logging.info("Bot started!")
     await dp.start_polling(bot)
 
 
