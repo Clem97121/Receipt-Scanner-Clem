@@ -2,19 +2,23 @@ version: '3.8'
 
 services:
   bot:
-    build: .
+    build:
+      context: ./app
+      dockerfile: Dockerfile
     container_name: receipt_bot
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     depends_on:
       - redis
 
-  worker:
-    build: .
-    container_name: receipt_worker
+  celery_worker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: receipt_celery_worker
     command: celery -A tasks.celery_app worker --loglevel=info
-    restart: unless-stopped
+    restart: always
     env_file:
       - .env
     depends_on:
@@ -23,6 +27,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: receipt_redis
-    restart: unless-stopped
     ports:
       - "6379:6379"
+    restart: always
