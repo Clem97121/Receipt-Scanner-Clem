@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "receipt-scanner.name" . }}-bot
+  labels:
+    {{- include "receipt-scanner.labels" . | nindent 4 }}
+    app: receipt-bot
+spec:
+  replicas: {{ .Values.bot.replicaCount }}
+  selector:
+    matchLabels:
+      app: receipt-bot
+  template:
+    metadata:
+      labels:
+        app: receipt-bot
+    spec:
+      containers:
+        - name: bot
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "bot.py"]
+          envFrom:
+            - secretRef:
+                name: {{ include "receipt-scanner.name" . }}-secrets

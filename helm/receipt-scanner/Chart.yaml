@@ -1,0 +1,6 @@
+apiVersion: v2
+name: receipt-scanner
+description: Helm chart for Telegram Receipt Scanner bot, Celery worker, and Redis
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

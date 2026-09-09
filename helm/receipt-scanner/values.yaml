@@ -1,0 +1,18 @@
+image:
+  repository: ghcr.io/clem97121/receipt-scanner-app
+  pullPolicy: Always
+  tag: "latest"
+
+bot:
+  replicaCount: 1
+
+celery:
+  replicaCount: 1
+
+redis:
+  image: redis:7-alpine
+  port: 6379
+
+secrets:
+  botToken: ""
+  azureStorageConnectionString: ""

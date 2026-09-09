@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "receipt-scanner.name" . }}-celery
+  labels:
+    {{- include "receipt-scanner.labels" . | nindent 4 }}
+    app: receipt-celery
+spec:
+  replicas: {{ .Values.celery.replicaCount }}
+  selector:
+    matchLabels:
+      app: receipt-celery
+  template:
+    metadata:
+      labels:
+        app: receipt-celery
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["celery", "-A", "tasks", "worker", "--loglevel=info"]
+          envFrom:
+            - secretRef:
+                name: {{ include "receipt-scanner.name" . }}-secrets
