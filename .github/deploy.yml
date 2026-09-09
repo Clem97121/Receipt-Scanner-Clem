@@ -1,0 +1,62 @@
+name: Build and Deploy to K3s via Helm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'helm/**'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/receipt-scanner-app:latest
+            ghcr.io/${{ github.repository_owner }}/receipt-scanner-app:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH using Helm
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            if [ ! -d "Receipt-Scanner-Clem" ]; then
+              git clone https://github.com/Clem97121/Receipt-Scanner-Clem.git
+            fi
+            cd Receipt-Scanner-Clem
+            git pull origin main
+
+            helm upgrade --install receipt-scanner ./helm/receipt-scanner \
+              --namespace receipt-scanner --create-namespace \
+              --set image.repository="ghcr.io/${{ github.repository_owner }}/receipt-scanner-app" \
+              --set image.tag="${{ github.sha }}" \
+              --set secrets.botToken="${{ secrets.BOT_TOKEN }}" \
+              --set secrets.azureStorageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+              --set secrets.geminiApiKey="${{ secrets.GEMINI_API_KEY }}"
+
+            kubectl rollout restart deployment/receipt-scanner-bot -n receipt-scanner
+            kubectl rollout restart deployment/receipt-scanner-celery -n receipt-scanner
