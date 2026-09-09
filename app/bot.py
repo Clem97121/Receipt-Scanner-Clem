@@ -74,7 +74,7 @@ async def handle_photo(message: types.Message):
         process_receipt_task.delay(blob_name, message.chat.id)
 
         await message.answer(
-            f"✅ Photo uploaded to Azure Blob Storage successfully!\n"
+            f"✅ Photo uploaded to Azure Blob Storage successfully! TEST TEST TEST\n"
             f"• Container: `{AZURE_CONTAINER_NAME}`\n"
             f"• Path: `{blob_name}`",
             parse_mode="Markdown",
