@@ -16,3 +16,4 @@ redis:
 secrets:
   botToken: ""
   azureStorageConnectionString: ""
+  geminiApiKey: ""
