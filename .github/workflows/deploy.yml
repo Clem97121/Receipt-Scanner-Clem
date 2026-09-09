@@ -16,6 +16,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Lowercase repository owner
+        run: |
+          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -30,13 +34,17 @@ jobs:
           file: ./app/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/receipt-scanner-app:latest
-            ghcr.io/${{ github.repository_owner }}/receipt-scanner-app:${{ github.sha }}
+            ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app:latest
+            ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app:${{ github.sha }}
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: Lowercase repository owner
+        run: |
+          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Deploy via SSH using Helm
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -52,7 +60,7 @@ jobs:
 
             helm upgrade --install receipt-scanner ./helm/receipt-scanner \
               --namespace receipt-scanner --create-namespace \
-              --set image.repository="ghcr.io/${{ github.repository_owner }}/receipt-scanner-app" \
+              --set image.repository="ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app" \
               --set image.tag="${{ github.sha }}" \
               --set secrets.botToken="${{ secrets.BOT_TOKEN }}" \
               --set secrets.azureStorageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
