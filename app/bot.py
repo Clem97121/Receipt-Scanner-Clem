@@ -90,7 +90,10 @@ async def main():
     ensure_container_exists()
 
     logging.info("Bot started!")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
