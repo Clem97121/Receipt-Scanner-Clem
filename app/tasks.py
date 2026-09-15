@@ -4,12 +4,13 @@ import logging
 import os
 from azure.storage.blob import BlobServiceClient
 from celery import Celery
+from celery.exceptions import MaxRetriesExceededError
 from dotenv import load_dotenv
 from aiogram import Bot
 from google import genai
 from google.genai import types
 from PIL import Image
-from google.genai.errors import APIError
+from google.genai.errors import APIError, ServerError
 
 from schemas import ReceiptData
 
@@ -61,7 +62,7 @@ def analyze_receipt_with_gemini(image_bytes: bytes) -> ReceiptData:
     return ReceiptData.model_validate_json(response.text)
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=5)
+@celery_app.task(bind=True, max_retries=5)
 def process_receipt_task(self, blob_name: str, chat_id: int):
     logging.info(f"[Celery Worker] Starting Gemini analysis for: {blob_name}")
 
@@ -91,16 +92,27 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
             f"🛒 *Items:*\n{items_formatted}"
         )
 
-    except APIError as e:
-        # Retry up to 3 times if API returns 503 or is temporarily unavailable
-        if e.code == 503 or "UNAVAILABLE" in str(e):
-            logging.warning(
-                f"[Gemini 503] API high demand peak. Retrying {self.request.retries + 1}/3..."
-            )
-            raise self.retry(exc=e, countdown=5)
+    except (APIError, ServerError) as e:
+        is_503 = getattr(e, "code", None) == 503 or "UNAVAILABLE" in str(e)
 
-        logging.error(f"Gemini API error: {e}")
-        response_text = f"❌ AI API error: `{e.message}`"
+        if is_503:
+            # Экспоненциальная задержка: 10s, 20s, 40s, 80s, 160s
+            countdown = 10 * (2 ** self.request.retries)
+            logging.warning(
+                f"[Gemini 503] API high demand peak. Retrying {self.request.retries + 1}/5 in {countdown}s..."
+            )
+            try:
+                raise self.retry(exc=e, countdown=countdown)
+            except MaxRetriesExceededError:
+                logging.error(f"[Celery Worker] Max retries reached for blob: {blob_name}")
+                response_text = (
+                    "⚠️ *Сервис распознавания временно перегружен*\n\n"
+                    "Google Gemini API не ответил из-за пика нагрузки. "
+                    "Пожалуйста, отправьте чек еще раз через 2–3 минуты."
+                )
+        else:
+            logging.error(f"Gemini API error: {e}")
+            response_text = f"❌ AI API error: `{e}`"
 
     except Exception as e:
         logging.error(f"Unexpected processing error: {e}")
