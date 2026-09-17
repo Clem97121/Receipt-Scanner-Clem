@@ -11,6 +11,7 @@ from google import genai
 from google.genai import types
 from PIL import Image
 from google.genai.errors import APIError, ServerError
+from sqlalchemy.exc import IntegrityError
 
 from db.database import AsyncSessionLocal, engine
 from db.crud import save_receipt_to_db, init_db
@@ -70,15 +71,24 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
     """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
     try:
         # 1. Save to Database
-        await init_db()
-        async with AsyncSessionLocal() as session:
-            await save_receipt_to_db(
-                session=session,
-                user_id=chat_id,
-                blob_name=blob_name,
-                receipt_data=receipt,
+        try:
+            await init_db()
+            async with AsyncSessionLocal() as session:
+                await save_receipt_to_db(
+                    session=session,
+                    user_id=chat_id,
+                    blob_name=blob_name,
+                    receipt_data=receipt,
+                )
+            logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
+
+        except IntegrityError:
+            logging.warning(f"[Celery Worker] Duplicate receipt detected for blob: {blob_name}")
+            await _send_telegram_msg(
+                chat_id, 
+                "⚠️ *This receipt has already been processed and saved!*"
             )
-        logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
+            return
 
         # 2. Format result message
         items_formatted = "\n".join(
