@@ -68,6 +68,9 @@ jobs:
               --set secrets.botToken="${{ secrets.BOT_TOKEN }}" \
               --set secrets.azureStorageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
               --set secrets.geminiApiKey="${{ secrets.GEMINI_API_KEY }}"
+              --set secrets.postgresUser="${{ secrets.POSTGRES_USER }}" \
+              --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+              --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}"
 
             kubectl rollout restart deployment/receipt-scanner-bot -n receipt-scanner
             kubectl rollout restart deployment/receipt-scanner-celery -n receipt-scanner

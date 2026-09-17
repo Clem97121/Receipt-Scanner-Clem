@@ -17,3 +17,6 @@ secrets:
   botToken: ""
   azureStorageConnectionString: ""
   geminiApiKey: ""
+  postgresUser: ""
+  postgresPassword: ""
+  postgresDb: ""

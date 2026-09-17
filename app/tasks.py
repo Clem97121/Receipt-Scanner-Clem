@@ -12,6 +12,8 @@ from google.genai import types
 from PIL import Image
 from google.genai.errors import APIError, ServerError
 
+from db.database import AsyncSessionLocal
+from db.crud import save_receipt_to_db, init_db
 from schemas import ReceiptData
 
 load_dotenv()
@@ -85,7 +87,21 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
             else:
                 raise e
 
-        # 3. Format result for user
+        # 3. Saving Results in PostgreSQL
+        async def _save_data():
+            await init_db()
+            async with AsyncSessionLocal() as session:
+                await save_receipt_to_db(
+                    session=session,
+                    user_id=chat_id,
+                    blob_name=blob_name,
+                    receipt_data=receipt,
+                )
+
+        asyncio.run(_save_data())
+        logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
+
+        # 4. Format result for user
         items_formatted = "\n".join(
             [
                 f"• *{item.name}* ({item.quantity}x) — `{item.total_price} {receipt.currency}` _[{item.category}]_"
