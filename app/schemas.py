@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -8,9 +9,7 @@ class ReceiptItem(BaseModel):
     price_per_unit: Optional[float] = Field(
         default=None, description="Price per unit"
     )
-    total_price: float = Field(
-        description="Total cost for this item"
-    )
+    total_price: float = Field(description="Total cost for this item")
     category: str = Field(
         description="Category: Groceries, Household, Electronics, Cafe, Clothing, Other"
     )
@@ -20,7 +19,7 @@ class ReceiptData(BaseModel):
     store_name: Optional[str] = Field(
         default=None, description="Store or venue name"
     )
-    date: Optional[str] = Field(
+    date: Optional[date] = Field(
         default=None, description="Receipt date in YYYY-MM-DD format"
     )
     currency: str = Field(
