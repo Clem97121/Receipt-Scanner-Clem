@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date as DateType
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -19,7 +19,7 @@ class ReceiptData(BaseModel):
     store_name: Optional[str] = Field(
         default=None, description="Store or venue name"
     )
-    date: Optional[date] = Field(
+    date: Optional[DateType] = Field(
         default=None, description="Receipt date in YYYY-MM-DD format"
     )
     currency: str = Field(
