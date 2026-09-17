@@ -12,7 +12,7 @@ from google.genai import types
 from PIL import Image
 from google.genai.errors import APIError, ServerError
 
-from db.database import AsyncSessionLocal
+from db.database import AsyncSessionLocal, engine
 from db.crud import save_receipt_to_db, init_db
 from schemas import ReceiptData
 
@@ -33,14 +33,6 @@ blob_service_client = BlobServiceClient.from_connection_string(
     AZURE_STORAGE_CONNECTION_STRING
 )
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
-
-
-async def send_telegram_notification(chat_id: int, text: str):
-    bot = Bot(token=BOT_TOKEN)
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
-    finally:
-        await bot.session.close()
 
 
 def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MODEL) -> ReceiptData:
@@ -65,6 +57,52 @@ def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MO
     return ReceiptData.model_validate_json(response.text)
 
 
+async def _send_telegram_msg(chat_id: int, text: str):
+    """Helper to send telegram message in its own single loop during error cases."""
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    finally:
+        await bot.session.close()
+
+
+async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: ReceiptData):
+    """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
+    try:
+        # 1. Save to Database
+        await init_db()
+        async with AsyncSessionLocal() as session:
+            await save_receipt_to_db(
+                session=session,
+                user_id=chat_id,
+                blob_name=blob_name,
+                receipt_data=receipt,
+            )
+        logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
+
+        # 2. Format result message
+        items_formatted = "\n".join(
+            [
+                f"• *{item.name}* ({item.quantity}x) — `{item.total_price} {receipt.currency}` _[{item.category}]_"
+                for item in receipt.items
+            ]
+        )
+
+        response_text = (
+            f"🏪 *Store:* {receipt.store_name or 'Not specified'}\n"
+            f"📅 *Date:* {receipt.date or 'Not specified'}\n"
+            f"💰 *Total:* `{receipt.total_amount} {receipt.currency}`\n\n"
+            f"🛒 *Items:*\n{items_formatted}"
+        )
+
+        # 3. Send response to Telegram
+        await _send_telegram_msg(chat_id, response_text)
+
+    finally:
+        # Dispose DB engine connections attached to this loop
+        await engine.dispose()
+
+
 @celery_app.task(bind=True, max_retries=2)
 def process_receipt_task(self, blob_name: str, chat_id: int):
     logging.info(f"[Celery Worker] Starting Gemini analysis for: {blob_name}")
@@ -87,34 +125,11 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
             else:
                 raise e
 
-        # 3. Saving Results in PostgreSQL
-        async def _save_data():
-            await init_db()
-            async with AsyncSessionLocal() as session:
-                await save_receipt_to_db(
-                    session=session,
-                    user_id=chat_id,
-                    blob_name=blob_name,
-                    receipt_data=receipt,
-                )
-
-        asyncio.run(_save_data())
-        logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
-
-        # 4. Format result for user
-        items_formatted = "\n".join(
-            [
-                f"• *{item.name}* ({item.quantity}x) — `{item.total_price} {receipt.currency}` _[{item.category}]_"
-                for item in receipt.items
-            ]
-        )
-
-        response_text = (
-            f"🏪 *Store:* {receipt.store_name or 'Not specified'}\n"
-            f"📅 *Date:* {receipt.date or 'Not specified'}\n"
-            f"💰 *Total:* `{receipt.total_amount} {receipt.currency}`\n\n"
-            f"🛒 *Items:*\n{items_formatted}"
-        )
+        # 3. Run entire DB + Telegram async flow in ONE single event loop
+        asyncio.run(_process_and_notify_pipeline(chat_id, blob_name, receipt))
+        
+        logging.info(f"[Celery Worker] Task completed for chat {chat_id}")
+        return {"status": "completed", "blob_name": blob_name}
 
     except (APIError, ServerError) as e:
         is_503 = getattr(e, "code", None) == 503 or "UNAVAILABLE" in str(e)
@@ -125,20 +140,16 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
                 raise self.retry(exc=e, countdown=3)
             except MaxRetriesExceededError:
                 logging.error(f"[Celery Worker] Fast Fail triggered for blob: {blob_name}")
-                response_text = (
+                error_msg = (
                     "⚠️ *The AI servers are currently overloaded*\n\n"
                     "Unable to recognize the receipt within 10 seconds. "
                     "Please resubmit the photo in a minute."
                 )
+                asyncio.run(_send_telegram_msg(chat_id, error_msg))
         else:
             logging.error(f"Gemini API error: {e}")
-            response_text = f"❌ AI API error: `{e}`"
+            asyncio.run(_send_telegram_msg(chat_id, f"❌ AI API error: `{e}`"))
 
     except Exception as e:
         logging.error(f"Unexpected processing error: {e}")
-        response_text = f"❌ Error processing receipt: `{e}`"
-
-    # 4. Send response to Telegram
-    asyncio.run(send_telegram_notification(chat_id, response_text))
-    logging.info(f"[Celery Worker] Task completed for chat {chat_id}")
-    return {"status": "completed", "blob_name": blob_name}
+        asyncio.run(_send_telegram_msg(chat_id, f"❌ Error processing receipt: `{e}`"))
