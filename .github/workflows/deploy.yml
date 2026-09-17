@@ -30,6 +30,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -39,6 +42,8 @@ jobs:
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app:latest
             ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
@@ -67,7 +72,7 @@ jobs:
               --set image.tag="${{ github.sha }}" \
               --set secrets.botToken="${{ secrets.BOT_TOKEN }}" \
               --set secrets.azureStorageConnectionString="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
-              --set secrets.geminiApiKey="${{ secrets.GEMINI_API_KEY }}"
+              --set secrets.geminiApiKey="${{ secrets.GEMINI_API_KEY }}" \
               --set secrets.postgresUser="${{ secrets.POSTGRES_USER }}" \
               --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
               --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}"
