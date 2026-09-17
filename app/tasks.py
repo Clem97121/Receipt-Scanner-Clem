@@ -22,6 +22,9 @@ AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "receipts")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+PRIMARY_MODEL = "gemini-3.6-flash"
+FALLBACK_MODEL = "gemini-2.5-flash"
+
 celery_app = Celery("receipt_tasks", broker=REDIS_URL, backend=REDIS_URL)
 
 blob_service_client = BlobServiceClient.from_connection_string(
@@ -38,8 +41,8 @@ async def send_telegram_notification(chat_id: int, text: str):
         await bot.session.close()
 
 
-def analyze_receipt_with_gemini(image_bytes: bytes) -> ReceiptData:
-    """Sends image to Gemini Vision model and returns parsed ReceiptData object."""
+def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MODEL) -> ReceiptData:
+    """Sends image to specified Gemini model and returns parsed ReceiptData object."""
     image = Image.open(io.BytesIO(image_bytes))
 
     prompt = (
@@ -48,9 +51,8 @@ def analyze_receipt_with_gemini(image_bytes: bytes) -> ReceiptData:
         "and a complete list of items with their categories."
     )
 
-    # Use Structured Outputs (response_schema)
     response = ai_client.models.generate_content(
-        model="gemini-3.6-flash",
+        model=model_name,
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -58,11 +60,10 @@ def analyze_receipt_with_gemini(image_bytes: bytes) -> ReceiptData:
         ),
     )
 
-    # Validate retrieved JSON with Pydantic
     return ReceiptData.model_validate_json(response.text)
 
 
-@celery_app.task(bind=True, max_retries=5)
+@celery_app.task(bind=True, max_retries=2)
 def process_receipt_task(self, blob_name: str, chat_id: int):
     logging.info(f"[Celery Worker] Starting Gemini analysis for: {blob_name}")
 
@@ -74,8 +75,15 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
         download_stream = blob_client.download_blob()
         image_bytes = download_stream.readall()
 
-        # 2. Send to Gemini
-        receipt = analyze_receipt_with_gemini(image_bytes)
+        # 2. Try Primary Model first, fallback if 503 occurs
+        try:
+            receipt = analyze_receipt_with_gemini(image_bytes, model_name=PRIMARY_MODEL)
+        except (APIError, ServerError) as e:
+            if getattr(e, "code", None) == 503 or "UNAVAILABLE" in str(e):
+                logging.warning(f"[Gemini 503] {PRIMARY_MODEL} unavailable. Trying fallback {FALLBACK_MODEL}...")
+                receipt = analyze_receipt_with_gemini(image_bytes, model_name=FALLBACK_MODEL)
+            else:
+                raise e
 
         # 3. Format result for user
         items_formatted = "\n".join(
@@ -96,19 +104,15 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
         is_503 = getattr(e, "code", None) == 503 or "UNAVAILABLE" in str(e)
 
         if is_503:
-            # Экспоненциальная задержка: 10s, 20s, 40s, 80s, 160s
-            countdown = 10 * (2 ** self.request.retries)
-            logging.warning(
-                f"[Gemini 503] API high demand peak. Retrying {self.request.retries + 1}/5 in {countdown}s..."
-            )
+            logging.warning(f"[Gemini 503] Both models busy. Retry {self.request.retries + 1}/2 in 3s...")
             try:
-                raise self.retry(exc=e, countdown=countdown)
+                raise self.retry(exc=e, countdown=3)
             except MaxRetriesExceededError:
-                logging.error(f"[Celery Worker] Max retries reached for blob: {blob_name}")
+                logging.error(f"[Celery Worker] Fast Fail triggered for blob: {blob_name}")
                 response_text = (
-                    "⚠️ *Сервис распознавания временно перегружен*\n\n"
-                    "Google Gemini API не ответил из-за пика нагрузки. "
-                    "Пожалуйста, отправьте чек еще раз через 2–3 минуты."
+                    "⚠️ *The AI servers are currently overloaded*\n\n"
+                    "Unable to recognize the receipt within 10 seconds. "
+                    "Please resubmit the photo in a minute."
                 )
         else:
             logging.error(f"Gemini API error: {e}")
