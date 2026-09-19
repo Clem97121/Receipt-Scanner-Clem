@@ -109,7 +109,8 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
                 for i, item in enumerate(receipt.items)
             ]
         )
-        return (
+
+        response_text = (
             f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
             f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
             f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"
