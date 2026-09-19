@@ -1,4 +1,5 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import calendar
 
 PRESET_CATEGORIES = [
     ("🥦 Groceries", "Groceries"),
@@ -102,4 +103,29 @@ def get_item_categories_keyboard(item_id: int, receipt_id: int) -> InlineKeyboar
         buttons.append(row)
     
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"select_item:{item_id}:{receipt_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_stats_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    """Generates month pagination keyboard for statistics."""
+    prev_month = month - 1
+    prev_year = year
+    if prev_month < 1:
+        prev_month = 12
+        prev_year -= 1
+
+    next_month = month + 1
+    next_year = year
+    if next_month > 12:
+        next_month = 1
+        next_year += 1
+
+    month_name = calendar.month_name[month]
+
+    buttons = [
+        [
+            InlineKeyboardButton(text="⬅️ Prev", callback_data=f"stats:{prev_year}:{prev_month}"),
+            InlineKeyboardButton(text=f"📅 {month_name} {year}", callback_data="ignore_stats_title"),
+            InlineKeyboardButton(text="Next ➡️", callback_data=f"stats:{next_year}:{next_month}")
+        ]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)

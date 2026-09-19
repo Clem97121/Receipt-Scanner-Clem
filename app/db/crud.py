@@ -102,15 +102,16 @@ async def update_receipt_category(
     )
     await session.execute(stmt)
     await session.commit()
-    
+
     # Перезагружаем чек с обновившимися позициями
     return await get_receipt_by_id(session, receipt_id, user_id)
 
 
-async def get_monthly_stats(session: AsyncSession, user_id: int):
-    """Returns total monthly expenses and category breakdown for the specified user."""
-    now = datetime.now()
-    year, month = now.year, now.month
+async def get_monthly_stats(session: AsyncSession, user_id: int, year: int = None, month: int = None):
+    """Returns total monthly expenses and category breakdown for the specified user and period."""
+    if year is None or month is None:
+        now = datetime.now()
+        year, month = now.year, now.month
 
     total_stmt = select(func.sum(Receipt.total_amount)).where(
         Receipt.user_id == user_id,
