@@ -7,7 +7,6 @@ from celery import Celery
 from celery.exceptions import MaxRetriesExceededError
 from dotenv import load_dotenv
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -44,9 +43,11 @@ def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MO
     image = Image.open(io.BytesIO(image_bytes))
 
     prompt = (
-        "You are an automated receipt scanner. Analyze the receipt image "
-        "and extract the store name, date, total amount, currency, "
-        "and a complete list of items. "
+        "You are an automated receipt scanner and document validator. "
+        "Analyze the image and determine whether it is a valid purchase receipt, store invoice, or cash register slip. "
+        "1. Set `is_receipt` to `true` ONLY if it is an actual purchase receipt or bill. "
+        "2. Set `is_receipt` to `false` if it is a selfie, photo of people, animals, landscapes, screenshots of chats, memes, or any non-receipt image. "
+        "If it IS a receipt, extract the store name, date, total amount, currency, and a complete list of items. "
         "CRITICAL: For each item's category, you MUST strictly choose one of the following exact string values: "
         "'Groceries', 'Cafe & Dining', 'Transport', 'Household', 'Utilities', 'Entertainment', 'Shopping', or 'Other'. "
         "Do not invent new categories. If you are unsure about an item, assign it to 'Other'."
@@ -81,7 +82,17 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
 async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: ReceiptData):
     """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
     try:
-        # 1. Save to Database
+        # 1. Check if image is actually a receipt
+        if not receipt.is_receipt:
+            logging.warning(f"[Celery Worker] Image is not a receipt for chat {chat_id}")
+            await _send_telegram_msg(
+                chat_id, 
+                "❌ <b>This doesn't look like a receipt!</b>\n\n"
+                "Please send a clear photo of a purchase receipt or store bill."
+            )
+            return
+
+        # 2. Save to Database
         db_receipt = None
         try:
             await init_db()
@@ -98,11 +109,11 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             logging.warning(f"[Celery Worker] Duplicate receipt detected for blob: {blob_name}")
             await _send_telegram_msg(
                 chat_id, 
-                "⚠️ *This receipt has already been processed and saved!*"
+                "⚠️ <b>This receipt has already been processed and saved!</b>"
             )
             return
 
-        # 2. Format result message
+        # 3. Format result message with numbered items sorted by id (or index order)
         items_formatted = "\n".join(
             [
                 f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
@@ -117,12 +128,12 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             f"🛒 <b>Items:</b>\n{items_formatted}"
         )
 
-        # 3. Attach inline keyboard with Delete button if receipt ID is present
+        # 4. Attach inline keyboard with Delete/Edit buttons if receipt ID is present
         keyboard = None
         if db_receipt and hasattr(db_receipt, "id"):
             keyboard = get_receipt_inline_keyboard(db_receipt.id)
 
-        # 4. Send response to Telegram with HTML parse mode
+        # 5. Send response to Telegram with HTML parse mode
         await _send_telegram_msg(chat_id, response_text, reply_markup=keyboard)
 
     finally:
@@ -167,15 +178,15 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
             except MaxRetriesExceededError:
                 logging.error(f"[Celery Worker] Fast Fail triggered for blob: {blob_name}")
                 error_msg = (
-                    "⚠️ *The AI servers are currently overloaded*\n\n"
+                    "⚠️ <b>The AI servers are currently overloaded</b>\n\n"
                     "Unable to recognize the receipt within 10 seconds. "
                     "Please resubmit the photo in a minute."
                 )
                 asyncio.run(_send_telegram_msg(chat_id, error_msg))
         else:
             logging.error(f"Gemini API error: {e}")
-            asyncio.run(_send_telegram_msg(chat_id, f"❌ AI API error: `{e}`"))
+            asyncio.run(_send_telegram_msg(chat_id, f"❌ AI API error: <code>{e}</code>"))
 
     except Exception as e:
         logging.error(f"Unexpected processing error: {e}")
-        asyncio.run(_send_telegram_msg(chat_id, f"❌ Error processing receipt: `{e}`"))
+        asyncio.run(_send_telegram_msg(chat_id, f"❌ Error processing receipt: <code>{e}</code>"))

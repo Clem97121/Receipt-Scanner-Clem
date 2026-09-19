@@ -11,7 +11,7 @@ class ReceiptItem(BaseModel):
     )
     total_price: float = Field(description="Total cost for this item")
     category: Literal[
-        "Groceries", 
+        "Groceries",
         "Cafe & Dining", 
         "Transport", 
         "Household",
@@ -37,4 +37,8 @@ class ReceiptData(BaseModel):
     total_amount: float = Field(description="Total receipt amount")
     items: List[ReceiptItem] = Field(
         description="Complete list of purchased items"
+    )
+    is_receipt: bool = Field(
+        default=True,
+        description="Set to true ONLY if the image is an actual purchase receipt, cash register slip, or store invoice. Set to false if it is a selfie, photo of people, animals, landscapes, chats, memes, or any non-receipt image."
     )
