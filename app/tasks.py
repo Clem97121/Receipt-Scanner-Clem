@@ -27,7 +27,7 @@ AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "receipts")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-PRIMARY_MODEL = "gemini-3.6-flash"
+PRIMARY_MODEL = "Gemini 3.5 Flash Lite"
 FALLBACK_MODEL = "gemini-3.5-flash"
 
 celery_app = Celery("receipt_tasks", broker=REDIS_URL, backend=REDIS_URL)
