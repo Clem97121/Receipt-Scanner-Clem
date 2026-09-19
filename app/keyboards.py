@@ -60,9 +60,11 @@ def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
 
 def get_items_selection_keyboard(receipt) -> InlineKeyboardMarkup:
     """Returns a grid of item numbers for selection."""
+    sorted_items = sorted(receipt.items, key=lambda x: x.id)
     buttons = []
     row = []
-    for i, item in enumerate(receipt.items):
+    
+    for i, item in enumerate(sorted_items):
         row.append(InlineKeyboardButton(text=f"📌 {i+1}", callback_data=f"select_item:{item.id}:{receipt.id}"))
         if len(row) == 5:
             buttons.append(row)
