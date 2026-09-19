@@ -150,14 +150,14 @@ async def get_receipt_item_by_id(session: AsyncSession, item_id: int):
 async def update_receipt_item_field(
     session: AsyncSession, item_id: int, field: str, new_value
 ) -> Optional[Receipt]:
-    """Updates a specific field of a receipt item, recalculates total if needed, and returns parent receipt."""
+    """Updates a specific field of a receipt item, recalculates total receipt amount, and returns parent receipt."""
     item = await session.get(ReceiptItem, item_id)
     if not item:
         return None
 
     if hasattr(item, field):
         setattr(item, field, new_value)
-        await session.commit()
+        await session.flush()
 
         stmt = (
             select(Receipt)
@@ -165,6 +165,14 @@ async def update_receipt_item_field(
             .where(Receipt.id == item.receipt_id)
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        receipt = result.scalar_one_or_none()
+
+        if receipt:
+            # Автоматически пересчитываем общую сумму чека по всем позициям
+            receipt.total_amount = sum(i.total_price for i in receipt.items)
+            
+            await session.commit()
+            await session.refresh(receipt)
+            return receipt
 
     return None
