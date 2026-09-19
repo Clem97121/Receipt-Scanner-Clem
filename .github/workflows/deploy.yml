@@ -49,9 +49,21 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Lowercase repository owner
-        run: |
-          echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
+      - name: Copy Helm chart to server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "helm/receipt-scanner"
+          target: "~/deploy-tmp"
+          strip_components: 0
 
       - name: Deploy via SSH using Helm
         uses: appleboy/ssh-action@v1.0.3
@@ -60,12 +72,10 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            if [ ! -d "Receipt-Scanner-Clem" ]; then
-              git clone https://github.com/Clem97121/Receipt-Scanner-Clem.git
-            fi
-            cd Receipt-Scanner-Clem
-            git pull origin main
+            # Переходим в папку, куда мы только что скопировали чарт
+            cd ~/deploy-tmp
 
+            # Запускаем обновление (Kubernetes сам перезапустит поды из-за нового github.sha)
             helm upgrade --install receipt-scanner ./helm/receipt-scanner \
               --namespace receipt-scanner --create-namespace \
               --set image.repository="ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app" \
@@ -76,6 +86,6 @@ jobs:
               --set secrets.postgresUser="${{ secrets.POSTGRES_USER }}" \
               --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
               --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}"
-
-            kubectl rollout restart deployment/receipt-scanner-bot -n receipt-scanner
-            kubectl rollout restart deployment/receipt-scanner-celery -n receipt-scanner
+            
+            # Удаляем временную папку, чтобы оставлять сервер в чистоте
+            rm -rf ~/deploy-tmp
