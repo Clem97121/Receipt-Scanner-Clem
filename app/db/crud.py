@@ -155,24 +155,24 @@ async def update_receipt_item_field(
     if not item:
         return None
 
-    if hasattr(item, field):
-        setattr(item, field, new_value)
-        await session.flush()
+    if not hasattr(item, field):
+        return None
 
-        stmt = (
-            select(Receipt)
-            .options(selectinload(Receipt.items))
-            .where(Receipt.id == item.receipt_id)
-        )
-        result = await session.execute(stmt)
-        receipt = result.scalar_one_or_none()
+    setattr(item, field, new_value)
 
-        if receipt:
-            # Автоматически пересчитываем общую сумму чека по всем позициям
-            receipt.total_amount = sum(i.total_price for i in receipt.items)
-            
-            await session.commit()
-            await session.refresh(receipt)
-            return receipt
+    stmt = (
+        select(Receipt)
+        .options(selectinload(Receipt.items))
+        .where(Receipt.id == item.receipt_id)
+    )
+    result = await session.execute(stmt)
+    receipt = result.scalar_one_or_none()
+
+    if receipt:
+        receipt.total_amount = sum(float(i.total_price) for i in receipt.items)
+
+        await session.commit()
+        await session.refresh(receipt)
+        return receipt
 
     return None
