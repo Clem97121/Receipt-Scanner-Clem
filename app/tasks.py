@@ -44,7 +44,10 @@ def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MO
     prompt = (
         "You are an automated receipt scanner. Analyze the receipt image "
         "and extract the store name, date, total amount, currency, "
-        "and a complete list of items with their categories."
+        "and a complete list of items. "
+        "CRITICAL: For each item's category, you MUST strictly choose one of the following exact string values: "
+        "'Groceries', 'Cafe & Dining', 'Transport', 'Household', 'Utilities', 'Entertainment', 'Shopping', or 'Other'. "
+        "Do not invent new categories. If you are unsure about an item, assign it to 'Other'."
     )
 
     response = ai_client.models.generate_content(
@@ -66,7 +69,7 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
         await bot.send_message(
             chat_id=chat_id, 
             text=text, 
-            parse_mode="Markdown", 
+            parse_mode="HTML", 
             reply_markup=reply_markup
         )
     finally:

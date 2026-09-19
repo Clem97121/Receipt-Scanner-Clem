@@ -1,5 +1,5 @@
 from datetime import date as DateType
-from typing import List, Optional
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -10,8 +10,17 @@ class ReceiptItem(BaseModel):
         default=None, description="Price per unit"
     )
     total_price: float = Field(description="Total cost for this item")
-    category: str = Field(
-        description="Category: Groceries, Household, Electronics, Cafe, Clothing, Other"
+    category: Literal[
+        "Groceries", 
+        "Cafe & Dining", 
+        "Transport", 
+        "Household",
+        "Utilities",
+        "Entertainment",
+        "Shopping", 
+        "Other"
+    ] = Field(
+        description="You MUST strictly classify the item into one of the allowed categories."
     )
 
 

@@ -1,6 +1,8 @@
 from datetime import datetime
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, extract, delete
+from sqlalchemy import select, func, extract, delete, update
+from sqlalchemy.orm import selectinload
 
 from db.database import Base, engine
 from db.models import Receipt, ReceiptItem, User
@@ -54,6 +56,55 @@ async def save_receipt_to_db(
     await session.commit()
     await session.refresh(receipt)
     return receipt
+
+
+async def get_receipt_by_id(session: AsyncSession, receipt_id: int, user_id: int) -> Optional[Receipt]:
+    """Fetches a receipt by ID with preloaded items for a specific user."""
+    stmt = (
+        select(Receipt)
+        .options(selectinload(Receipt.items))
+        .where(Receipt.id == receipt_id, Receipt.user_id == user_id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def update_receipt_field(
+    session: AsyncSession, receipt_id: int, user_id: int, field: str, new_value
+) -> Optional[Receipt]:
+    """Updates a specific field of a receipt and returns the updated entity."""
+    receipt = await get_receipt_by_id(session, receipt_id, user_id)
+    if not receipt:
+        return None
+
+    if hasattr(receipt, field):
+        setattr(receipt, field, new_value)
+        await session.commit()
+        await session.refresh(receipt)
+        return receipt
+
+    return None
+
+
+async def update_receipt_category(
+    session: AsyncSession, receipt_id: int, user_id: int, new_category: str
+) -> Optional[Receipt]:
+    """Updates the category for all items belonging to the receipt."""
+    receipt = await get_receipt_by_id(session, receipt_id, user_id)
+    if not receipt:
+        return None
+
+    # Обновляем категорию всех позиций чека
+    stmt = (
+        update(ReceiptItem)
+        .where(ReceiptItem.receipt_id == receipt_id)
+        .values(category=new_category)
+    )
+    await session.execute(stmt)
+    await session.commit()
+    
+    # Перезагружаем чек с обновившимися позициями
+    return await get_receipt_by_id(session, receipt_id, user_id)
 
 
 async def get_monthly_stats(session: AsyncSession, user_id: int):

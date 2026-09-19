@@ -2,16 +2,30 @@ import asyncio
 import io
 import logging
 import os
+from datetime import datetime
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 
 from tasks import process_receipt_task
 from db.database import AsyncSessionLocal
-from db.crud import get_monthly_stats, delete_receipt_by_id
-from keyboards import get_main_reply_keyboard
+from db.crud import (
+    get_monthly_stats, 
+    delete_receipt_by_id, 
+    get_receipt_by_id, 
+    update_receipt_field,
+    update_receipt_category
+)
+from keyboards import (
+    get_main_reply_keyboard, 
+    get_receipt_inline_keyboard, 
+    get_edit_fields_keyboard,
+    get_categories_keyboard
+)
 
 load_dotenv()
 
@@ -30,6 +44,10 @@ blob_service_client = BlobServiceClient.from_connection_string(
 )
 
 
+class EditReceiptState(StatesGroup):
+    waiting_for_value = State()
+
+
 def ensure_container_exists():
     """Ensure Azure Blob Storage container exists, create if not."""
     try:
@@ -42,6 +60,21 @@ def ensure_container_exists():
         logging.info(f"Container '{AZURE_CONTAINER_NAME}' already exists.")
     except Exception as e:
         logging.error(f"Error creating container: {e}")
+
+
+def format_receipt_text(receipt) -> str:
+    items_formatted = "\n".join(
+        [
+            f"• <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
+            for item in receipt.items
+        ]
+    )
+    return (
+        f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
+        f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
+        f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"
+        f"🛒 <b>Items:</b>\n{items_formatted}"
+    )
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -77,7 +110,7 @@ async def show_stats_handler(message: types.Message):
         f"💰 *Total Spent:* `{total:.2f}`\n\n"
         f"🏷 *By Category:*\n{cat_text}"
     )
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("delete_receipt:"))
@@ -90,9 +123,136 @@ async def delete_receipt_handler(callback: types.CallbackQuery):
 
     if success:
         await callback.answer("Receipt deleted successfully!")
-        await callback.message.edit_text("🗑 *This receipt has been deleted from the system.*", parse_mode="Markdown")
+        await callback.message.edit_text("🗑 *This receipt has been deleted from the system.*", parse_mode="HTML")
     else:
         await callback.answer("Could not find receipt or permission denied.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("edit_receipt:"))
+async def edit_receipt_init_handler(callback: types.CallbackQuery):
+    """Handler triggered when clicking '✏️ Edit' on a receipt card."""
+    receipt_id = int(callback.data.split(":")[1])
+    await callback.message.edit_reply_markup(reply_markup=get_edit_fields_keyboard(receipt_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("select_category:"))
+async def select_category_menu_handler(callback: types.CallbackQuery):
+    """Displays preset category inline keyboard."""
+    receipt_id = int(callback.data.split(":")[1])
+    await callback.message.edit_reply_markup(reply_markup=get_categories_keyboard(receipt_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("set_category:"))
+async def set_category_handler(callback: types.CallbackQuery):
+    """Sets a new category for all items in the receipt."""
+    _, receipt_id_str, new_category = callback.data.split(":")
+    receipt_id = int(receipt_id_str)
+
+    async with AsyncSessionLocal() as session:
+        updated_receipt = await update_receipt_category(
+            session=session,
+            receipt_id=receipt_id,
+            user_id=callback.from_user.id,
+            new_category=new_category
+        )
+
+    if updated_receipt:
+        formatted_text = format_receipt_text(updated_receipt)
+        await callback.message.edit_text(
+            text=formatted_text,
+            parse_mode="HTML",
+            reply_markup=get_receipt_inline_keyboard(receipt_id)
+        )
+        await callback.answer(f"Category changed to {new_category}!")
+    else:
+        await callback.answer("Failed to update category.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("cancel_edit:"))
+async def cancel_edit_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Cancels the edit flow and restores original card buttons."""
+    receipt_id = int(callback.data.split(":")[1])
+    await state.clear()
+    await callback.message.edit_reply_markup(reply_markup=get_receipt_inline_keyboard(receipt_id))
+    await callback.answer("Editing cancelled.")
+
+
+@dp.callback_query(F.data.startswith("edit_field:"))
+async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSMContext):
+    """Handles field selection for editing and prompts user for input."""
+    _, field, receipt_id_str = callback.data.split(":")
+    receipt_id = int(receipt_id_str)
+
+    await state.update_data(
+        receipt_id=receipt_id,
+        field=field,
+        message_id=callback.message.message_id
+    )
+    await state.set_state(EditReceiptState.waiting_for_value)
+
+    prompt_messages = {
+        "store_name": "Please send the new store name:",
+        "date": "Please send the new date in `YYYY-MM-DD` format (e.g., 2026-03-29):",
+        "total_amount": "Please send the new total amount (e.g., 12.50):"
+    }
+
+    await callback.message.answer(
+        prompt_messages.get(field, "Please send the new value:"),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(EditReceiptState.waiting_for_value)
+async def process_new_field_value_handler(message: types.Message, state: FSMContext):
+    """Receives the new field value, updates DB, and refreshes receipt message."""
+    user_data = await state.get_data()
+    receipt_id = user_data["receipt_id"]
+    field = user_data["field"]
+    target_msg_id = user_data["message_id"]
+
+    raw_text = message.text.strip()
+    parsed_value = raw_text
+
+    # Field input validation and formatting
+    if field == "total_amount":
+        try:
+            parsed_value = float(raw_text.replace(",", "."))
+        except ValueError:
+            await message.answer("❌ Invalid amount format. Please enter a valid number (e.g., 15.50):")
+            return
+    elif field == "date":
+        try:
+            parsed_value = datetime.strptime(raw_text, "%Y-%m-%d").date()
+        except ValueError:
+            await message.answer("❌ Invalid date format. Please use `YYYY-MM-DD` (e.g., 2026-03-29):", parse_mode="HTML")
+            return
+
+    async with AsyncSessionLocal() as session:
+        updated_receipt = await update_receipt_field(
+            session=session,
+            receipt_id=receipt_id,
+            user_id=message.from_user.id,
+            field=field,
+            new_value=parsed_value
+        )
+
+    if updated_receipt:
+        formatted_text = format_receipt_text(updated_receipt)
+        await bot.edit_message_text(
+            text=formatted_text,
+            chat_id=message.chat.id,
+            message_id=target_msg_id,
+            parse_mode="HTML",
+            reply_markup=get_receipt_inline_keyboard(receipt_id)
+        )
+        await message.answer("✅ Receipt successfully updated!")
+    else:
+        await message.answer("❌ Failed to update receipt. Receipt not found or permission denied.")
+
+    await state.clear()
 
 
 @dp.message(F.photo)
@@ -104,7 +264,7 @@ async def handle_photo(message: types.Message):
 
     file_bytes = io.BytesIO()
     await bot.download_file(file_info.file_path, destination=file_bytes)
-    file_bytes.seek(0)
+    raw_bytes = file_bytes.getvalue()
 
     blob_name = f"{message.from_user.id}/{photo.file_id}.jpg"
 
@@ -112,15 +272,15 @@ async def handle_photo(message: types.Message):
         blob_client = blob_service_client.get_blob_client(
             container=AZURE_CONTAINER_NAME, blob=blob_name
         )
-        blob_client.upload_blob(file_bytes, overwrite=True)
 
-        process_receipt_task.delay(blob_name, message.chat.id)
+        await asyncio.to_thread(blob_client.upload_blob, raw_bytes, overwrite=True)
+        await asyncio.to_thread(process_receipt_task.delay, blob_name, message.chat.id)
 
         await message.answer(
             f"✅ Photo uploaded to Azure Blob Storage successfully!\n"
             f"• Container: `{AZURE_CONTAINER_NAME}`\n"
             f"• Path: `{blob_name}`",
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except Exception as e:
         logging.error(f"Error uploading to Azure Blob Storage: {e}")

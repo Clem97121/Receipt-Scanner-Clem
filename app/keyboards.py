@@ -1,8 +1,19 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
+PRESET_CATEGORIES = [
+    ("🥦 Groceries", "Groceries"),
+    ("🍽 Cafe & Dining", "Cafe & Dining"),
+    ("🚗 Transport", "Transport"),
+    ("🏠 Household", "Household"),
+    ("⚡ Utilities & Bills", "Utilities"),
+    ("🎮 Entertainment", "Entertainment"),
+    ("🛍 Shopping", "Shopping"),
+    ("❓ Other", "Other"),
+]
+
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
-    """The main permanent keyboard is located below the input field."""
+    """Returns the main persistent reply keyboard located beneath the input field."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Monthly Expenses")]
@@ -12,14 +23,50 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_receipt_inline_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
-    """Inline buttons below the card for the created receipt."""
+    """Returns the main inline keyboard attached to a receipt card."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🗑 Delete receipt", 
+                    text="✏️ Edit", 
+                    callback_data=f"edit_receipt:{receipt_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Delete", 
                     callback_data=f"delete_receipt:{receipt_id}"
                 )
             ]
         ]
     )
+
+
+def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
+    """Returns the inline keyboard with field selection for editing."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🏪 Store Name", callback_data=f"edit_field:store_name:{receipt_id}"),
+                InlineKeyboardButton(text="📅 Date", callback_data=f"edit_field:date:{receipt_id}")
+            ],
+            [
+                InlineKeyboardButton(text="💰 Total Amount", callback_data=f"edit_field:total_amount:{receipt_id}"),
+                InlineKeyboardButton(text="🏷 Category", callback_data=f"select_category:{receipt_id}")
+            ],
+            [
+                InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel_edit:{receipt_id}")
+            ]
+        ]
+    )
+
+
+def get_categories_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
+    """Returns an inline keyboard with preset category buttons."""
+    buttons = []
+    for i in range(0, len(PRESET_CATEGORIES), 2):
+        row = []
+        for label, cat_code in PRESET_CATEGORIES[i:i+2]:
+            row.append(InlineKeyboardButton(text=label, callback_data=f"set_category:{receipt_id}:{cat_code}"))
+        buttons.append(row)
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"edit_receipt:{receipt_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
