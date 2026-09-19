@@ -19,7 +19,8 @@ from db.crud import (
     get_receipt_by_id, 
     update_receipt_field,
     get_receipt_item_by_id,
-    update_receipt_item_field
+    update_receipt_item_field,
+    get_receipt_by_blob_name
 )
 from keyboards import (
     get_main_reply_keyboard, 
@@ -331,7 +332,7 @@ async def select_item_category_menu(callback: types.CallbackQuery):
     """Shows category selection keyboard for a specific item."""
     _, item_id_str, receipt_id_str = callback.data.split(":")
     item_id, receipt_id = int(item_id_str), int(receipt_id_str)
-    
+
     await callback.message.edit_reply_markup(reply_markup=get_item_categories_keyboard(item_id, receipt_id))
     await callback.answer()
 
@@ -366,7 +367,7 @@ async def set_item_category_handler(callback: types.CallbackQuery):
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    await message.answer("📥 Downloading photo from Telegram...")
+    await message.answer("📥 Checking photo and downloading from Telegram...")
 
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
@@ -378,6 +379,21 @@ async def handle_photo(message: types.Message):
     blob_name = f"{message.from_user.id}/{photo.file_id}.jpg"
 
     try:
+        async with AsyncSessionLocal() as session:
+            existing_receipt = await get_receipt_by_blob_name(session, blob_name, message.from_user.id)
+
+        if existing_receipt:
+            formatted_text = (
+                "⚠️ <b>This receipt has already been processed and saved!</b>\n\n" 
+                + format_receipt_text(existing_receipt)
+            )
+            await message.answer(
+                text=formatted_text,
+                parse_mode="HTML",
+                reply_markup=get_receipt_inline_keyboard(existing_receipt.id)
+            )
+            return
+
         blob_client = blob_service_client.get_blob_client(
             container=AZURE_CONTAINER_NAME, blob=blob_name
         )
@@ -387,13 +403,12 @@ async def handle_photo(message: types.Message):
 
         await message.answer(
             f"✅ Photo uploaded to Azure Blob Storage successfully!\n"
-            f"• Container: <code>{AZURE_CONTAINER_NAME}</code>\n"
-            f"• Path: <code>{blob_name}</code>",
+            f"• Processing with AI...",
             parse_mode="HTML",
         )
     except Exception as e:
-        logging.error(f"Error uploading to Azure Blob Storage: {e}")
-        await message.answer("❌ Failed to save photo to Azure Blob Storage.")
+        logging.error(f"Error handling photo upload: {e}")
+        await message.answer("❌ Failed to process photo.")
 
 
 async def main():

@@ -176,3 +176,13 @@ async def update_receipt_item_field(
         return receipt
 
     return None
+
+async def get_receipt_by_blob_name(session: AsyncSession, blob_name: str, user_id: int) -> Optional[Receipt]:
+    """Fetches a receipt by its unique blob name and user ID, preloading items."""
+    stmt = (
+        select(Receipt)
+        .options(selectinload(Receipt.items))
+        .where(Receipt.blob_name == blob_name, Receipt.user_id == user_id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
