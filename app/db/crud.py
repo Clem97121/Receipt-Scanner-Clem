@@ -1,11 +1,10 @@
-from datetime import date, datetime
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, extract, delete
 
 from db.database import Base, engine
 from db.models import Receipt, ReceiptItem, User
 from schemas import ReceiptData
-
-from sqlalchemy import select, func, extract, delete
 
 
 async def init_db():
@@ -16,8 +15,8 @@ async def init_db():
 
 async def save_receipt_to_db(
     session: AsyncSession, user_id: int, blob_name: str, receipt_data: ReceiptData
-):
-    """Saves the user, the receipt, and all item details."""
+) -> Receipt:
+    """Saves the user, receipt, and line items to DB and returns the created Receipt entity."""
     receipt_date = receipt_data.date
     if isinstance(receipt_date, str):
         try:
@@ -53,9 +52,12 @@ async def save_receipt_to_db(
             )
         )
     await session.commit()
+    await session.refresh(receipt)
+    return receipt
 
-async def get_monthly_stats(session, user_id: int):
-    """Returns the total amount and a breakdown by category for the current month."""
+
+async def get_monthly_stats(session: AsyncSession, user_id: int):
+    """Returns total monthly expenses and category breakdown for the specified user."""
     now = datetime.now()
     year, month = now.year, now.month
 
@@ -83,8 +85,8 @@ async def get_monthly_stats(session, user_id: int):
     return total_sum, categories
 
 
-async def delete_receipt_by_id(session, receipt_id: int, user_id: int) -> bool:
-    """Deletes a receipt from the database by ID, after verifying the owner."""
+async def delete_receipt_by_id(session: AsyncSession, receipt_id: int, user_id: int) -> bool:
+    """Deletes a receipt from the database by ID after validating ownership."""
     stmt = delete(Receipt).where(Receipt.id == receipt_id, Receipt.user_id == user_id)
     result = await session.execute(stmt)
     await session.commit()
