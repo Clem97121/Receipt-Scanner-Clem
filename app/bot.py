@@ -71,10 +71,13 @@ def ensure_container_exists():
 
 def format_receipt_text(receipt) -> str:
     """Helper to format a Receipt DB entity into an HTML text string with numbered items."""
+
+    sorted_items = sorted(receipt.items, key=lambda x: x.id)
+
     items_formatted = "\n".join(
         [
             f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
-            for i, item in enumerate(receipt.items)
+            for i, item in enumerate(sorted_items)
         ]
     )
     return (
