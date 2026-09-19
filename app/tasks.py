@@ -18,6 +18,8 @@ from db.database import AsyncSessionLocal, engine
 from db.crud import save_receipt_to_db, init_db
 from schemas import ReceiptData
 
+from keyboards import get_receipt_inline_keyboard
+
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -69,7 +71,7 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
         await bot.send_message(
             chat_id=chat_id, 
             text=text, 
-            parse_mode="HTML", 
+            parse_mode="HTML",
             reply_markup=reply_markup
         )
     finally:
@@ -103,37 +105,27 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
         # 2. Format result message
         items_formatted = "\n".join(
             [
-                f"• *{item.name}* ({item.quantity}x) — `{item.total_price} {receipt.currency}` _[{item.category}]_"
+                f"• <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
                 for item in receipt.items
             ]
         )
 
         response_text = (
-            f"🏪 *Store:* {receipt.store_name or 'Not specified'}\n"
-            f"📅 *Date:* {receipt.date or 'Not specified'}\n"
-            f"💰 *Total:* `{receipt.total_amount} {receipt.currency}`\n\n"
-            f"🛒 *Items:*\n{items_formatted}"
+            f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
+            f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
+            f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"
+            f"🛒 <b>Items:</b>\n{items_formatted}"
         )
 
         # 3. Attach inline keyboard with Delete button if receipt ID is present
         keyboard = None
         if db_receipt and hasattr(db_receipt, "id"):
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🗑 Удалить чек",
-                            callback_data=f"delete_receipt:{db_receipt.id}"
-                        )
-                    ]
-                ]
-            )
+            keyboard = get_receipt_inline_keyboard(db_receipt.id)
 
-        # 4. Send response to Telegram
+        # 4. Send response to Telegram with HTML parse mode
         await _send_telegram_msg(chat_id, response_text, reply_markup=keyboard)
 
     finally:
-        # Dispose DB engine connections attached to this loop
         await engine.dispose()
 
 
