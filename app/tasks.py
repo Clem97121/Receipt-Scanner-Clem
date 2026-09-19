@@ -7,6 +7,7 @@ from celery import Celery
 from celery.exceptions import MaxRetriesExceededError
 from dotenv import load_dotenv
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -58,11 +59,16 @@ def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MO
     return ReceiptData.model_validate_json(response.text)
 
 
-async def _send_telegram_msg(chat_id: int, text: str):
-    """Helper to send telegram message in its own single loop during error cases."""
+async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
+    """Helper to send telegram message in its own single loop during error cases or with keyboards."""
     bot = Bot(token=BOT_TOKEN)
     try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        await bot.send_message(
+            chat_id=chat_id, 
+            text=text, 
+            parse_mode="Markdown", 
+            reply_markup=reply_markup
+        )
     finally:
         await bot.session.close()
 
@@ -71,10 +77,11 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
     """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
     try:
         # 1. Save to Database
+        db_receipt = None
         try:
             await init_db()
             async with AsyncSessionLocal() as session:
-                await save_receipt_to_db(
+                db_receipt = await save_receipt_to_db(
                     session=session,
                     user_id=chat_id,
                     blob_name=blob_name,
@@ -105,8 +112,22 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             f"🛒 *Items:*\n{items_formatted}"
         )
 
-        # 3. Send response to Telegram
-        await _send_telegram_msg(chat_id, response_text)
+        # 3. Attach inline keyboard with Delete button if receipt ID is present
+        keyboard = None
+        if db_receipt and hasattr(db_receipt, "id"):
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🗑 Удалить чек",
+                            callback_data=f"delete_receipt:{db_receipt.id}"
+                        )
+                    ]
+                ]
+            )
+
+        # 4. Send response to Telegram
+        await _send_telegram_msg(chat_id, response_text, reply_markup=keyboard)
 
     finally:
         # Dispose DB engine connections attached to this loop

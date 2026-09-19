@@ -7,7 +7,11 @@ from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
+
 from tasks import process_receipt_task
+from db.database import AsyncSessionLocal
+from db.crud import get_monthly_stats, delete_receipt_by_id
+from keyboards import get_main_reply_keyboard
 
 load_dotenv()
 
@@ -46,10 +50,49 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    """Greeting handler that attaches the main reply keyboard."""
     await message.answer(
-        "👋 Hi! I'm an expense tracking bot.\n"
-        "Send me a photo of a receipt, and I'll process it!"
+        "👋 Hi! I'm an expense tracking bot.\n\n"
+        "• Send me a photo of a receipt, and I'll process it.\n"
+        "• Click «📊 Monthly Expenses» to view your statistics.",
+        reply_markup=get_main_reply_keyboard(),
     )
+
+
+@dp.message(F.text == "📊 Monthly Expenses")
+@dp.message(Command("stats"))
+async def show_stats_handler(message: types.Message):
+    """Handler for the '📊 Monthly Expenses' button or /stats command."""
+    async with AsyncSessionLocal() as session:
+        total, categories = await get_monthly_stats(session, message.from_user.id)
+
+    if total == 0:
+        await message.answer("📊 No saved expenses found for this month.")
+        return
+
+    cat_text = "\n".join([f"• *{cat or 'Uncategorized'}*: `{amount:.2f}`" for cat, amount in categories])
+
+    text = (
+        f"📊 *Expense Statistics for Current Month*\n\n"
+        f"💰 *Total Spent:* `{total:.2f}`\n\n"
+        f"🏷 *By Category:*\n{cat_text}"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+
+@dp.callback_query(F.data.startswith("delete_receipt:"))
+async def delete_receipt_handler(callback: types.CallbackQuery):
+    """Handler for the inline '🗑 Delete Receipt' button."""
+    receipt_id = int(callback.data.split(":")[1])
+
+    async with AsyncSessionLocal() as session:
+        success = await delete_receipt_by_id(session, receipt_id, callback.from_user.id)
+
+    if success:
+        await callback.answer("Receipt deleted successfully!")
+        await callback.message.edit_text("🗑 *This receipt has been deleted from the system.*", parse_mode="Markdown")
+    else:
+        await callback.answer("Could not find receipt or permission denied.", show_alert=True)
 
 
 @dp.message(F.photo)
