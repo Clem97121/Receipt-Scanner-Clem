@@ -50,7 +50,7 @@ def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="💰 Total Amount", callback_data=f"edit_field:total_amount:{receipt_id}"),
-                InlineKeyboardButton(text="🏷 Category", callback_data=f"select_category:{receipt_id}")
+                InlineKeyboardButton(text="🛒 Edit Items", callback_data=f"edit_items_menu:{receipt_id}")
             ],
             [
                 InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel_edit:{receipt_id}")
@@ -58,15 +58,46 @@ def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
+def get_items_selection_keyboard(receipt) -> InlineKeyboardMarkup:
+    """Returns a grid of item numbers for selection."""
+    buttons = []
+    row = []
+    for i, item in enumerate(receipt.items):
+        row.append(InlineKeyboardButton(text=f"📌 {i+1}", callback_data=f"select_item:{item.id}:{receipt.id}"))
+        if len(row) == 5:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"edit_receipt:{receipt.id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_categories_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
-    """Returns an inline keyboard with preset category buttons."""
+def get_single_item_edit_keyboard(item_id: int, receipt_id: int) -> InlineKeyboardMarkup:
+    """Returns options to edit a specific item (Name, Price, Category, Back)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✏️ Name", callback_data=f"edit_item_field:name:{item_id}:{receipt_id}"),
+                InlineKeyboardButton(text="💰 Price", callback_data=f"edit_item_field:total_price:{item_id}:{receipt_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🏷 Category", callback_data=f"select_item_category:{item_id}:{receipt_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Back to Items", callback_data=f"edit_items_menu:{receipt_id}")
+            ]
+        ]
+    )
+
+def get_item_categories_keyboard(item_id: int, receipt_id: int) -> InlineKeyboardMarkup:
+    """Returns preset category buttons for a specific item."""
     buttons = []
     for i in range(0, len(PRESET_CATEGORIES), 2):
         row = []
         for label, cat_code in PRESET_CATEGORIES[i:i+2]:
-            row.append(InlineKeyboardButton(text=label, callback_data=f"set_category:{receipt_id}:{cat_code}"))
+            row.append(InlineKeyboardButton(text=label, callback_data=f"set_item_cat:{item_id}:{receipt_id}:{cat_code}"))
         buttons.append(row)
     
-    buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"edit_receipt:{receipt_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"select_item:{item_id}:{receipt_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

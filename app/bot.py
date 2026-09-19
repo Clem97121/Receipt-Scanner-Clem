@@ -18,13 +18,16 @@ from db.crud import (
     delete_receipt_by_id, 
     get_receipt_by_id, 
     update_receipt_field,
-    update_receipt_category
+    get_receipt_item_by_id,
+    update_receipt_item_field
 )
 from keyboards import (
     get_main_reply_keyboard, 
     get_receipt_inline_keyboard, 
     get_edit_fields_keyboard,
-    get_categories_keyboard
+    get_items_selection_keyboard,
+    get_single_item_edit_keyboard,
+    get_item_categories_keyboard
 )
 
 load_dotenv()
@@ -48,6 +51,10 @@ class EditReceiptState(StatesGroup):
     waiting_for_value = State()
 
 
+class EditItemState(StatesGroup):
+    waiting_for_value = State()
+
+
 def ensure_container_exists():
     """Ensure Azure Blob Storage container exists, create if not."""
     try:
@@ -63,10 +70,11 @@ def ensure_container_exists():
 
 
 def format_receipt_text(receipt) -> str:
+    """Helper to format a Receipt DB entity into an HTML text string with numbered items."""
     items_formatted = "\n".join(
         [
-            f"• <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
-            for item in receipt.items
+            f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
+            for i, item in enumerate(receipt.items)
         ]
     )
     return (
@@ -103,12 +111,12 @@ async def show_stats_handler(message: types.Message):
         await message.answer("📊 No saved expenses found for this month.")
         return
 
-    cat_text = "\n".join([f"• *{cat or 'Uncategorized'}*: `{amount:.2f}`" for cat, amount in categories])
+    cat_text = "\n".join([f"• <b>{cat or 'Uncategorized'}</b>: <code>{amount:.2f}</code>" for cat, amount in categories])
 
     text = (
-        f"📊 *Expense Statistics for Current Month*\n\n"
-        f"💰 *Total Spent:* `{total:.2f}`\n\n"
-        f"🏷 *By Category:*\n{cat_text}"
+        f"📊 <b>Expense Statistics for Current Month</b>\n\n"
+        f"💰 <b>Total Spent:</b> <code>{total:.2f}</code>\n\n"
+        f"🏷 <b>By Category:</b>\n{cat_text}"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -123,7 +131,7 @@ async def delete_receipt_handler(callback: types.CallbackQuery):
 
     if success:
         await callback.answer("Receipt deleted successfully!")
-        await callback.message.edit_text("🗑 *This receipt has been deleted from the system.*", parse_mode="HTML")
+        await callback.message.edit_text("🗑 <b>This receipt has been deleted from the system.</b>", parse_mode="HTML")
     else:
         await callback.answer("Could not find receipt or permission denied.", show_alert=True)
 
@@ -136,40 +144,6 @@ async def edit_receipt_init_handler(callback: types.CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("select_category:"))
-async def select_category_menu_handler(callback: types.CallbackQuery):
-    """Displays preset category inline keyboard."""
-    receipt_id = int(callback.data.split(":")[1])
-    await callback.message.edit_reply_markup(reply_markup=get_categories_keyboard(receipt_id))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("set_category:"))
-async def set_category_handler(callback: types.CallbackQuery):
-    """Sets a new category for all items in the receipt."""
-    _, receipt_id_str, new_category = callback.data.split(":")
-    receipt_id = int(receipt_id_str)
-
-    async with AsyncSessionLocal() as session:
-        updated_receipt = await update_receipt_category(
-            session=session,
-            receipt_id=receipt_id,
-            user_id=callback.from_user.id,
-            new_category=new_category
-        )
-
-    if updated_receipt:
-        formatted_text = format_receipt_text(updated_receipt)
-        await callback.message.edit_text(
-            text=formatted_text,
-            parse_mode="HTML",
-            reply_markup=get_receipt_inline_keyboard(receipt_id)
-        )
-        await callback.answer(f"Category changed to {new_category}!")
-    else:
-        await callback.answer("Failed to update category.", show_alert=True)
-
-
 @dp.callback_query(F.data.startswith("cancel_edit:"))
 async def cancel_edit_handler(callback: types.CallbackQuery, state: FSMContext):
     """Cancels the edit flow and restores original card buttons."""
@@ -179,9 +153,11 @@ async def cancel_edit_handler(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Editing cancelled.")
 
 
+# --- Editing Main Receipt Fields (Store, Date, Total Amount) ---
+
 @dp.callback_query(F.data.startswith("edit_field:"))
 async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSMContext):
-    """Handles field selection for editing and prompts user for input."""
+    """Handles main field selection for editing and prompts user for input."""
     _, field, receipt_id_str = callback.data.split(":")
     receipt_id = int(receipt_id_str)
 
@@ -194,7 +170,7 @@ async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSM
 
     prompt_messages = {
         "store_name": "Please send the new store name:",
-        "date": "Please send the new date in `YYYY-MM-DD` format (e.g., 2026-03-29):",
+        "date": "Please send the new date in <code>YYYY-MM-DD</code> format (e.g., 2026-03-29):",
         "total_amount": "Please send the new total amount (e.g., 12.50):"
     }
 
@@ -207,7 +183,7 @@ async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSM
 
 @dp.message(EditReceiptState.waiting_for_value)
 async def process_new_field_value_handler(message: types.Message, state: FSMContext):
-    """Receives the new field value, updates DB, and refreshes receipt message."""
+    """Receives the new main field value, updates DB, and refreshes receipt message."""
     user_data = await state.get_data()
     receipt_id = user_data["receipt_id"]
     field = user_data["field"]
@@ -216,7 +192,6 @@ async def process_new_field_value_handler(message: types.Message, state: FSMCont
     raw_text = message.text.strip()
     parsed_value = raw_text
 
-    # Field input validation and formatting
     if field == "total_amount":
         try:
             parsed_value = float(raw_text.replace(",", "."))
@@ -227,7 +202,7 @@ async def process_new_field_value_handler(message: types.Message, state: FSMCont
         try:
             parsed_value = datetime.strptime(raw_text, "%Y-%m-%d").date()
         except ValueError:
-            await message.answer("❌ Invalid date format. Please use `YYYY-MM-DD` (e.g., 2026-03-29):", parse_mode="HTML")
+            await message.answer("❌ Invalid date format. Please use <code>YYYY-MM-DD</code> (e.g., 2026-03-29):", parse_mode="HTML")
             return
 
     async with AsyncSessionLocal() as session:
@@ -255,6 +230,137 @@ async def process_new_field_value_handler(message: types.Message, state: FSMCont
     await state.clear()
 
 
+# --- Editing Specific Receipt Items ---
+
+@dp.callback_query(F.data.startswith("edit_items_menu:"))
+async def edit_items_menu_handler(callback: types.CallbackQuery):
+    """Displays the list of item numbers to choose for editing."""
+    receipt_id = int(callback.data.split(":")[1])
+    async with AsyncSessionLocal() as session:
+        receipt = await get_receipt_by_id(session, receipt_id, callback.from_user.id)
+    
+    if receipt:
+        await callback.message.edit_reply_markup(reply_markup=get_items_selection_keyboard(receipt))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("select_item:"))
+async def select_item_handler(callback: types.CallbackQuery):
+    """Displays edit options for a specific item (Name, Price, Category)."""
+    _, item_id_str, receipt_id_str = callback.data.split(":")
+    item_id, receipt_id = int(item_id_str), int(receipt_id_str)
+    
+    await callback.message.edit_reply_markup(reply_markup=get_single_item_edit_keyboard(item_id, receipt_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("edit_item_field:"))
+async def select_item_field_to_edit(callback: types.CallbackQuery, state: FSMContext):
+    """Prompts user for new value (Name or Price) of a specific item."""
+    _, field, item_id_str, receipt_id_str = callback.data.split(":")
+    item_id, receipt_id = int(item_id_str), int(receipt_id_str)
+
+    await state.update_data(
+        item_id=item_id,
+        receipt_id=receipt_id,
+        field=field,
+        message_id=callback.message.message_id
+    )
+    await state.set_state(EditItemState.waiting_for_value)
+
+    prompt_messages = {
+        "name": "Please send the new item name:",
+        "total_price": "Please send the new total price for this item (e.g., 25.50):"
+    }
+
+    await callback.message.answer(
+        prompt_messages.get(field, "Please send the new value:"),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(EditItemState.waiting_for_value)
+async def process_new_item_field_value(message: types.Message, state: FSMContext):
+    """Receives new value for item field, updates DB, and updates message card."""
+    user_data = await state.get_data()
+    item_id = user_data["item_id"]
+    receipt_id = user_data["receipt_id"]
+    field = user_data["field"]
+    target_msg_id = user_data["message_id"]
+
+    raw_text = message.text.strip()
+    parsed_value = raw_text
+
+    if field == "total_price":
+        try:
+            parsed_value = float(raw_text.replace(",", "."))
+        except ValueError:
+            await message.answer("❌ Invalid price format. Please enter a valid number (e.g., 15.50):")
+            return
+
+    async with AsyncSessionLocal() as session:
+        updated_receipt = await update_receipt_item_field(
+            session=session,
+            item_id=item_id,
+            field=field,
+            new_value=parsed_value
+        )
+
+    if updated_receipt:
+        formatted_text = format_receipt_text(updated_receipt)
+        await bot.edit_message_text(
+            text=formatted_text,
+            chat_id=message.chat.id,
+            message_id=target_msg_id,
+            parse_mode="HTML",
+            reply_markup=get_single_item_edit_keyboard(item_id, receipt_id)
+        )
+        await message.answer("✅ Item successfully updated!")
+    else:
+        await message.answer("❌ Failed to update item.")
+
+    await state.clear()
+
+
+@dp.callback_query(F.data.startswith("select_item_category:"))
+async def select_item_category_menu(callback: types.CallbackQuery):
+    """Shows category selection keyboard for a specific item."""
+    _, item_id_str, receipt_id_str = callback.data.split(":")
+    item_id, receipt_id = int(item_id_str), int(receipt_id_str)
+    
+    await callback.message.edit_reply_markup(reply_markup=get_item_categories_keyboard(item_id, receipt_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("set_item_cat:"))
+async def set_item_category_handler(callback: types.CallbackQuery):
+    """Applies new category to a specific item."""
+    _, item_id_str, receipt_id_str, new_category = callback.data.split(":")
+    item_id, receipt_id = int(item_id_str), int(receipt_id_str)
+
+    async with AsyncSessionLocal() as session:
+        updated_receipt = await update_receipt_item_field(
+            session=session,
+            item_id=item_id,
+            field="category",
+            new_value=new_category
+        )
+
+    if updated_receipt:
+        formatted_text = format_receipt_text(updated_receipt)
+        await callback.message.edit_text(
+            text=formatted_text,
+            parse_mode="HTML",
+            reply_markup=get_single_item_edit_keyboard(item_id, receipt_id)
+        )
+        await callback.answer(f"Category changed to {new_category}!")
+    else:
+        await callback.answer("Failed to update item category.", show_alert=True)
+
+
+# --- Photo Upload and Processing Handler ---
+
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     await message.answer("📥 Downloading photo from Telegram...")
@@ -278,8 +384,8 @@ async def handle_photo(message: types.Message):
 
         await message.answer(
             f"✅ Photo uploaded to Azure Blob Storage successfully!\n"
-            f"• Container: `{AZURE_CONTAINER_NAME}`\n"
-            f"• Path: `{blob_name}`",
+            f"• Container: <code>{AZURE_CONTAINER_NAME}</code>\n"
+            f"• Path: <code>{blob_name}</code>",
             parse_mode="HTML",
         )
     except Exception as e:

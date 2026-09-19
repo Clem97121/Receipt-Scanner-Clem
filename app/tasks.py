@@ -105,12 +105,11 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
         # 2. Format result message
         items_formatted = "\n".join(
             [
-                f"• <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
-                for item in receipt.items
+                f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
+                for i, item in enumerate(receipt.items)
             ]
         )
-
-        response_text = (
+        return (
             f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
             f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
             f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"

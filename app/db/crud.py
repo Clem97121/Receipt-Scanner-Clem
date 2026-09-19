@@ -142,3 +142,29 @@ async def delete_receipt_by_id(session: AsyncSession, receipt_id: int, user_id: 
     result = await session.execute(stmt)
     await session.commit()
     return result.rowcount > 0
+
+async def get_receipt_item_by_id(session: AsyncSession, item_id: int):
+    """Fetches a specific receipt item by its ID."""
+    return await session.get(ReceiptItem, item_id)
+
+async def update_receipt_item_field(
+    session: AsyncSession, item_id: int, field: str, new_value
+) -> Optional[Receipt]:
+    """Updates a specific field of a receipt item, recalculates total if needed, and returns parent receipt."""
+    item = await session.get(ReceiptItem, item_id)
+    if not item:
+        return None
+
+    if hasattr(item, field):
+        setattr(item, field, new_value)
+        await session.commit()
+
+        stmt = (
+            select(Receipt)
+            .options(selectinload(Receipt.items))
+            .where(Receipt.id == item.receipt_id)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    return None
