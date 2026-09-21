@@ -17,28 +17,73 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     """Returns the main persistent reply keyboard located beneath the input field."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Monthly Expenses")]
+            [
+                KeyboardButton(text="📊 Monthly Expenses"),
+                KeyboardButton(text="📜 My Receipts")
+            ]
         ],
         resize_keyboard=True
     )
 
 
-def get_receipt_inline_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
-    """Returns the main inline keyboard attached to a receipt card."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✏️ Edit", 
-                    callback_data=f"edit_receipt:{receipt_id}"
-                ),
-                InlineKeyboardButton(
-                    text="🗑 Delete", 
-                    callback_data=f"delete_receipt:{receipt_id}"
-                )
-            ]
+def get_receipt_inline_keyboard(receipt_id: int, back_page: int = None) -> InlineKeyboardMarkup:
+    """Returns the main inline keyboard attached to a receipt card, with an optional back-to-list button."""
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Edit", 
+                callback_data=f"edit_receipt:{receipt_id}"
+            ),
+            InlineKeyboardButton(
+                text="🗑 Delete", 
+                callback_data=f"delete_receipt:{receipt_id}"
+            )
         ]
-    )
+    ]
+    if back_page is not None:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="📜 Back to List", 
+                callback_data=f"receipts_page:{back_page}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_receipts_list_keyboard(receipts, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """Generates a keyboard with a list of receipts and pagination controls."""
+    keyboard = []
+    
+    for r in receipts:
+        store = r.store_name or "Unknown Store"
+        total = f"{r.total_amount:.2f} {r.currency}" if r.total_amount is not None else ""
+        date = str(r.date) if r.date else ""
+        
+        btn_text = f"🏪 {store} | {total} | {date}"
+        if len(btn_text) > 36:
+            btn_text = btn_text[:33] + "..."
+            
+        keyboard.append([
+            InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"view_receipt_from_list:{r.id}:{page}"
+            )
+        ])
+    
+    # Navigation row
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"receipts_page:{page - 1}"))
+    
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{max(total_pages, 1)}", callback_data="ignore_receipts_title"))
+    
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"receipts_page:{page + 1}"))
+        
+    if nav_row:
+        keyboard.append(nav_row)
+        
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
@@ -59,6 +104,7 @@ def get_edit_fields_keyboard(receipt_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
+
 def get_items_selection_keyboard(receipt) -> InlineKeyboardMarkup:
     """Returns a grid of item numbers for selection."""
     sorted_items = sorted(receipt.items, key=lambda x: x.id)
@@ -75,6 +121,7 @@ def get_items_selection_keyboard(receipt) -> InlineKeyboardMarkup:
     
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"edit_receipt:{receipt.id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_single_item_edit_keyboard(item_id: int, receipt_id: int) -> InlineKeyboardMarkup:
     """Returns options to edit a specific item (Name, Price, Category, Back)."""
@@ -93,6 +140,7 @@ def get_single_item_edit_keyboard(item_id: int, receipt_id: int) -> InlineKeyboa
         ]
     )
 
+
 def get_item_categories_keyboard(item_id: int, receipt_id: int) -> InlineKeyboardMarkup:
     """Returns preset category buttons for a specific item."""
     buttons = []
@@ -104,6 +152,7 @@ def get_item_categories_keyboard(item_id: int, receipt_id: int) -> InlineKeyboar
     
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"select_item:{item_id}:{receipt_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 def get_stats_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
     """Generates month pagination keyboard for statistics."""

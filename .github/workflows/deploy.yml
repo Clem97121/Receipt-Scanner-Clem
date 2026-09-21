@@ -72,10 +72,8 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            # Переходим в папку, куда мы только что скопировали чарт
             cd ~/deploy-tmp
 
-            # Запускаем обновление (Kubernetes сам перезапустит поды из-за нового github.sha)
             helm upgrade --install receipt-scanner ./helm/receipt-scanner \
               --namespace receipt-scanner --create-namespace \
               --set image.repository="ghcr.io/${{ env.OWNER_LC }}/receipt-scanner-app" \
@@ -86,6 +84,5 @@ jobs:
               --set secrets.postgresUser="${{ secrets.POSTGRES_USER }}" \
               --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
               --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}"
-            
-            # Удаляем временную папку, чтобы оставлять сервер в чистоте
+
             rm -rf ~/deploy-tmp

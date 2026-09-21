@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, extract, delete, update
+from sqlalchemy import select, func, extract, delete, update, desc
 from sqlalchemy.orm import selectinload
 
 from db.database import Base, engine
@@ -187,3 +187,21 @@ async def get_receipt_by_blob_name(session: AsyncSession, blob_name: str, user_i
     )
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+async def get_user_receipts_paginated(session, user_id: int, offset: int = 0, limit: int = 5):
+    """Returns a paginated list of the user's checks, sorted from newest to oldest."""
+    stmt = (
+        select(Receipt)
+        .where(Receipt.user_id == user_id)
+        .order_by(desc(Receipt.id))
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()
+
+async def get_user_receipts_count(session, user_id: int) -> int:
+    """Returns the total number of receipts for a user."""
+    stmt = select(func.count(Receipt.id)).where(Receipt.user_id == user_id)
+    result = await session.execute(stmt)
+    return result.scalar() or 0
