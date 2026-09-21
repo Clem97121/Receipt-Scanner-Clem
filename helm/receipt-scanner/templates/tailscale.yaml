@@ -1,8 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: tailscale-proxy
-  namespace: default
+  name: {{ include "receipt-scanner.name" . }}-tailscale-proxy
+  labels:
+    {{- include "receipt-scanner.labels" . | nindent 4 }}
+    app: tailscale-proxy
 spec:
   replicas: 1
   selector:
@@ -37,8 +39,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: tailscale-proxy-svc
-  namespace: default
+  name: {{ include "receipt-scanner.name" . }}-tailscale-proxy-svc
+  labels:
+    {{- include "receipt-scanner.labels" . | nindent 4 }}
 spec:
   selector:
     app: tailscale-proxy
