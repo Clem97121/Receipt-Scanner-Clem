@@ -414,7 +414,7 @@ async def process_new_item_field_value(message: types.Message, state: FSMContext
     field = user_data["field"]
     target_msg_id = user_data["message_id"]
 
-    raw_text = message.text.strip()
+    raw_text = message.text.strip() if message.text else ""
     parsed_value = raw_text
 
     if field == "total_price":
