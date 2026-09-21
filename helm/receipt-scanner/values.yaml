@@ -13,6 +13,10 @@ redis:
   image: redis:7-alpine
   port: 6379
 
+postgres:
+  host: "postgres-svc"
+  port: 5432
+
 secrets:
   botToken: ""
   azureStorageConnectionString: ""
@@ -20,3 +24,4 @@ secrets:
   postgresUser: ""
   postgresPassword: ""
   postgresDb: ""
+  tailscaleAuthKey: ""

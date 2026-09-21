@@ -83,6 +83,7 @@ jobs:
               --set secrets.geminiApiKey="${{ secrets.GEMINI_API_KEY }}" \
               --set secrets.postgresUser="${{ secrets.POSTGRES_USER }}" \
               --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
-              --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}"
+              --set secrets.postgresDb="${{ secrets.POSTGRES_DB }}" \
+              --set secrets.tailscaleAuthKey="${{ secrets.TAILSCALE_AUTH_KEY }}"
 
             rm -rf ~/deploy-tmp

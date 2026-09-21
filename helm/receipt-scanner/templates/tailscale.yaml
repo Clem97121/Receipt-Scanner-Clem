@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tailscale-proxy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tailscale-proxy
+  template:
+    metadata:
+      labels:
+        app: tailscale-proxy
+    spec:
+      containers:
+      - name: tailscale
+        image: tailscale/tailscale:latest
+        env:
+        - name: TS_AUTHKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "receipt-scanner.name" . }}-secrets
+              key: TAILSCALE_AUTH_KEY
+        - name: TS_STATE_DIR
+          value: /var/lib/tailscale
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
+        volumeMounts:
+        - name: tailscale-state
+          mountPath: /var/lib/tailscale
+      volumes:
+      - name: tailscale-state
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tailscale-proxy-svc
+  namespace: default
+spec:
+  selector:
+    app: tailscale-proxy
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: grafana
+  - port: 5432
+    targetPort: 5432
+    name: postgres
