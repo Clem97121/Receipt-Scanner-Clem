@@ -74,6 +74,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        - name: TS_ROUTES
+          value: "10.42.0.0/16"
         securityContext:
           capabilities:
             add: ["NET_ADMIN"]
