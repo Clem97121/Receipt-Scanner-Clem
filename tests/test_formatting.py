@@ -57,6 +57,20 @@ def test_money_has_two_decimals_and_quantity_has_no_trailing_zeros():
     assert "2026-03-29" in text
 
 
+def test_long_receipt_fits_telegram_message_limit():
+    items = [{"name": f"item number {i} " + "x" * 40, "total_price": 1, "category": "Groceries"} for i in range(150)]
+    receipt = ReceiptData(store_name="Big", currency="CZK", total_amount=150, items=items)
+    text = format_receipt_text(receipt)
+    assert len(text) <= 3500
+    assert "1. <b>item number 0 " in text
+    assert "more items</i>" in text
+
+
+def test_short_receipt_is_not_truncated():
+    receipt = ReceiptData(currency="CZK", total_amount=1, items=[{"name": "a", "total_price": 1, "category": "Other"}])
+    assert "more items" not in format_receipt_text(receipt)
+
+
 def test_missing_store_and_date():
     receipt = ReceiptData(currency="CZK", total_amount=0, items=[])
     text = format_receipt_text(receipt)

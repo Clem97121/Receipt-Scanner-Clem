@@ -6,6 +6,7 @@ because bot.py, tasks.py and db/database.py read them at import time.
 import os
 import tempfile
 import time
+from unittest.mock import MagicMock
 
 _TMP_DIR = tempfile.mkdtemp(prefix="receipt-tests-")
 os.environ.update(
@@ -76,7 +77,8 @@ class TelegramHarness:
         self._update_id += 1
         return self._update_id
 
-    async def send(self, user_id: int, text: str | None = None, sticker: bool = False) -> list:
+    async def send(self, user_id: int, text: str | None = None, sticker: bool = False,
+                   photo_file_id: str | None = None) -> list:
         """Sends a message from the user and returns the Bot API calls it caused."""
         message = {
             "message_id": self._next_id(),
@@ -93,6 +95,8 @@ class TelegramHarness:
                 "file_id": "s", "file_unique_id": "s", "type": "regular",
                 "width": 1, "height": 1, "is_animated": False, "is_video": False,
             }
+        if photo_file_id:
+            message["photo"] = [{"file_id": photo_file_id, "file_unique_id": photo_file_id, "width": 800, "height": 1200}]
         return await self._feed({"update_id": self._next_id(), "message": message})
 
     async def click(self, user_id: int, data: str) -> list:
@@ -130,6 +134,32 @@ async def load_receipt(receipt_id: int) -> Receipt:
     async with AsyncSessionLocal() as session:
         stmt = select(Receipt).options(selectinload(Receipt.items)).where(Receipt.id == receipt_id)
         return (await session.execute(stmt)).scalar_one()
+
+
+class FakeStorage:
+    """In-memory stand-in for Azure Blob Storage that records uploads and deletions."""
+
+    def __init__(self):
+        self.uploaded = []
+        self.deleted = []
+
+    def get_blob_client(self, container: str, blob: str):
+        client = MagicMock()
+        client.download_blob.return_value.readall.return_value = b"image-bytes"
+        client.upload_blob.side_effect = lambda *args, **kwargs: self.uploaded.append(blob)
+        client.delete_blob.side_effect = lambda *args, **kwargs: self.deleted.append(blob)
+        return client
+
+
+@pytest.fixture(autouse=True)
+def storage(monkeypatch):
+    """Replaces Azure Blob Storage in the bot and the worker so no test talks to the real service."""
+    fake = FakeStorage()
+    import storage as storage_module
+    import tasks
+    for module in (storage_module, tasks):
+        monkeypatch.setattr(module.blob_service_client, "get_blob_client", fake.get_blob_client)
+    return fake
 
 
 @pytest.fixture

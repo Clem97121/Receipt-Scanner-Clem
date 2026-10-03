@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from bot import ALLOWED_CATEGORIES, parse_money_amount
+from handlers.edit import ALLOWED_CATEGORIES, parse_money_amount
 from keyboards import PRESET_CATEGORIES
 from schemas import ReceiptItem as AiReceiptItem
 

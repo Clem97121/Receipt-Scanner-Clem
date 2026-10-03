@@ -218,6 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # DB
+*.db
 .DS_Store
 
 # Terraform temporary files & state

@@ -1,6 +1,9 @@
 from aiogram.methods import EditMessageText
 
+import storage as storage_module
 from conftest import ITEM_ID, OWNER_ID, RECEIPT_ID, STRANGER_ID, load_receipt, texts
+from db.database import AsyncSessionLocal
+from db.models import Receipt
 
 
 # --- Ownership (IDOR) ---
@@ -37,6 +40,33 @@ async def test_non_editable_fields_are_rejected(tg):
     assert await tg.state(OWNER_ID) is None
     await tg.click(OWNER_ID, f"edit_item_field:receipt_id:{ITEM_ID}:{RECEIPT_ID}")
     assert await tg.state(OWNER_ID) is None
+
+
+# --- Deleting receipts ---
+
+async def test_owner_deletes_receipt_and_its_photo(tg, storage):
+    sent = texts(await tg.click(OWNER_ID, f"delete_receipt:{RECEIPT_ID}"))
+    assert any("deleted" in t for t in sent)
+    assert storage.deleted == ["owner-blob"]
+    async with AsyncSessionLocal() as session:
+        assert await session.get(Receipt, RECEIPT_ID) is None
+
+
+async def test_stranger_cannot_delete_receipt_or_photo(tg, storage):
+    await tg.click(STRANGER_ID, f"delete_receipt:{RECEIPT_ID}")
+    assert storage.deleted == []
+    assert (await load_receipt(RECEIPT_ID)).store_name == "Shop"
+
+
+async def test_storage_failure_does_not_block_deletion(tg, storage, monkeypatch):
+    def broken_get_blob_client(container, blob):
+        raise ConnectionError("azure is down")
+
+    monkeypatch.setattr(storage_module.blob_service_client, "get_blob_client", broken_get_blob_client)
+    sent = texts(await tg.click(OWNER_ID, f"delete_receipt:{RECEIPT_ID}"))
+    assert any("deleted" in t for t in sent)
+    async with AsyncSessionLocal() as session:
+        assert await session.get(Receipt, RECEIPT_ID) is None
 
 
 # --- Edit flow (FSM) ---

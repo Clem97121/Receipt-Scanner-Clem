@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
 from celery import Celery
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ from google.genai.errors import APIError, ServerError
 from sqlalchemy.exc import IntegrityError
 
 from db.database import AsyncSessionLocal, engine
-from db.crud import save_receipt_to_db, init_db
+from db.crud import save_receipt_to_db
 from schemas import ReceiptData
 
 from formatting import format_receipt_text
@@ -79,6 +80,17 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
         await bot.session.close()
 
 
+def _delete_unsaved_photo(blob_name: str) -> None:
+    """Deletes a photo that will never be linked to a saved receipt; failures are logged, not raised."""
+    try:
+        blob_service_client.get_blob_client(container=AZURE_CONTAINER_NAME, blob=blob_name).delete_blob()
+        logging.info(f"[Celery Worker] Deleted unsaved photo: {blob_name}")
+    except ResourceNotFoundError:
+        pass
+    except Exception:
+        logging.exception(f"[Celery Worker] Failed to delete unsaved photo: {blob_name}")
+
+
 async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: ReceiptData):
     """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
     try:
@@ -90,12 +102,24 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
                 "❌ <b>This doesn't look like a receipt!</b>\n\n"
                 "Please send a clear photo of a purchase receipt or store bill."
             )
+            await asyncio.to_thread(_delete_unsaved_photo, blob_name)
             return
 
-        # 2. Save to Database
+        # 2. Reject numbers that are impossible or would not fit the DB columns
+        problems = receipt.find_problems()
+        if problems:
+            logging.warning(f"[Celery Worker] Unreliable AI output for blob {blob_name}: {problems}")
+            await _send_telegram_msg(
+                chat_id,
+                "⚠️ <b>I couldn't read the amounts on this receipt reliably.</b>\n\n"
+                "Please send a clearer, well-lit photo of the whole receipt."
+            )
+            await asyncio.to_thread(_delete_unsaved_photo, blob_name)
+            return
+
+        # 3. Save to Database
         db_receipt = None
         try:
-            await init_db()
             async with AsyncSessionLocal() as session:
                 db_receipt = await save_receipt_to_db(
                     session=session,
@@ -113,15 +137,15 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             )
             return
 
-        # 3. Format result message with numbered items (shared formatter escapes HTML)
+        # 4. Format result message with numbered items (shared formatter escapes HTML)
         response_text = format_receipt_text(receipt)
 
-        # 4. Attach inline keyboard with Delete/Edit buttons if receipt ID is present
+        # 5. Attach inline keyboard with Delete/Edit buttons if receipt ID is present
         keyboard = None
         if db_receipt and hasattr(db_receipt, "id"):
             keyboard = get_receipt_inline_keyboard(db_receipt.id)
 
-        # 5. Send response to Telegram with HTML parse mode
+        # 6. Send response to Telegram with HTML parse mode
         await _send_telegram_msg(chat_id, response_text, reply_markup=keyboard)
 
     finally:
@@ -170,6 +194,7 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
                     "Please resubmit the photo in a minute."
                 )
                 asyncio.run(_send_telegram_msg(chat_id, error_msg))
+                _delete_unsaved_photo(blob_name)
                 return {"status": "failed", "blob_name": blob_name}
 
             logging.warning(
@@ -181,8 +206,11 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
             asyncio.run(_send_telegram_msg(
                 chat_id, "❌ The AI service failed to process your receipt. Please try again later."
             ))
+            _delete_unsaved_photo(blob_name)
 
     except Exception:
+        # The failure may have happened after the receipt was saved, so the photo is kept
+
         logging.exception(f"[Celery Worker] Unexpected processing error for blob: {blob_name}")
         asyncio.run(_send_telegram_msg(
             chat_id, "❌ Something went wrong while processing your receipt. Please try again later."

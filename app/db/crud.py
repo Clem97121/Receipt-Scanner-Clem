@@ -5,7 +5,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, extract, delete, desc
 from sqlalchemy.orm import selectinload
 
-from db.database import Base, engine
 from db.models import Receipt, ReceiptItem, User
 from schemas import ReceiptData
 
@@ -17,12 +16,6 @@ QUANTITY_QUANT = Decimal("0.001")
 def to_decimal(value, quant: Decimal = MONEY_QUANT) -> Decimal:
     """Converts a float/str/Decimal to a Decimal rounded to the column scale (via str to avoid binary float artifacts)."""
     return Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP)
-
-
-async def init_db():
-    """Automatically creates tables in Postgres at startup if they don't exist."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 
 async def save_receipt_to_db(
@@ -126,12 +119,17 @@ async def get_monthly_stats(session: AsyncSession, user_id: int, year: int = Non
     return total_sum, categories
 
 
-async def delete_receipt_by_id(session: AsyncSession, receipt_id: int, user_id: int) -> bool:
-    """Deletes a receipt from the database by ID after validating ownership."""
-    stmt = delete(Receipt).where(Receipt.id == receipt_id, Receipt.user_id == user_id)
+async def delete_receipt_by_id(session: AsyncSession, receipt_id: int, user_id: int) -> Optional[str]:
+    """Deletes a receipt owned by the user and returns its photo blob name, or None if nothing was deleted."""
+    stmt = (
+        delete(Receipt)
+        .where(Receipt.id == receipt_id, Receipt.user_id == user_id)
+        .returning(Receipt.blob_name)
+    )
     result = await session.execute(stmt)
+    blob_name = result.scalar_one_or_none()
     await session.commit()
-    return result.rowcount > 0
+    return blob_name
 
 async def get_receipt_item_by_id(session: AsyncSession, item_id: int):
     """Fetches a specific receipt item by its ID."""

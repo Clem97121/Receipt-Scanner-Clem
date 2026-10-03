@@ -7,6 +7,10 @@ def _esc(value) -> str:
     return escape(str(value))
 
 
+# Telegram rejects messages longer than 4096 characters; leave room for prefixes like "already processed"
+MAX_RECEIPT_TEXT_LENGTH = 3500
+
+
 def _money(value) -> str:
     """Formats a money amount (Decimal or float) with exactly two decimals."""
     return f"{Decimal(str(value)):.2f}"
@@ -30,16 +34,24 @@ def format_receipt_text(receipt) -> str:
         items.sort(key=lambda x: x.id)
 
     currency = _esc(receipt.currency)
-    items_formatted = "\n".join(
-        [
-            f"{i+1}. <b>{_esc(item.name)}</b> ({_quantity(item.quantity)}x) — "
-            f"<code>{_money(item.total_price)} {currency}</code> <i>[{_esc(item.category)}]</i>"
-            for i, item in enumerate(items)
-        ]
-    )
-    return (
+    header = (
         f"🏪 <b>Store:</b> {_esc(receipt.store_name or 'Not specified')}\n"
         f"📅 <b>Date:</b> {_esc(receipt.date or 'Not specified')}\n"
         f"💰 <b>Total:</b> <code>{_money(receipt.total_amount)} {currency}</code>\n\n"
-        f"🛒 <b>Items:</b>\n{items_formatted}"
+        f"🛒 <b>Items:</b>\n"
     )
+
+    lines = []
+    length = len(header)
+    for i, item in enumerate(items):
+        line = (
+            f"{i+1}. <b>{_esc(item.name)}</b> ({_quantity(item.quantity)}x) — "
+            f"<code>{_money(item.total_price)} {currency}</code> <i>[{_esc(item.category)}]</i>"
+        )
+        if length + len(line) + 1 > MAX_RECEIPT_TEXT_LENGTH:
+            lines.append(f"<i>…and {len(items) - i} more items</i>")
+            break
+        lines.append(line)
+        length += len(line) + 1
+
+    return header + "\n".join(lines)

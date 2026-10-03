@@ -26,4 +26,5 @@ google-genai==2.24.0
 # Database (PostgreSQL)
 # [asyncio] guarantees greenlet is installed (required by sqlalchemy.ext.asyncio)
 sqlalchemy[asyncio]==2.0.54
+alembic==1.20.0
 asyncpg==0.31.0
