@@ -4,7 +4,6 @@ import logging
 import os
 from azure.storage.blob import BlobServiceClient
 from celery import Celery
-from celery.exceptions import MaxRetriesExceededError
 from dotenv import load_dotenv
 from aiogram import Bot
 from google import genai
@@ -17,6 +16,7 @@ from db.database import AsyncSessionLocal, engine
 from db.crud import save_receipt_to_db, init_db
 from schemas import ReceiptData
 
+from formatting import format_receipt_text
 from keyboards import get_receipt_inline_keyboard
 
 load_dotenv()
@@ -113,20 +113,8 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             )
             return
 
-        # 3. Format result message with numbered items sorted by id (or index order)
-        items_formatted = "\n".join(
-            [
-                f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
-                for i, item in enumerate(receipt.items)
-            ]
-        )
-
-        response_text = (
-            f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
-            f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
-            f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"
-            f"🛒 <b>Items:</b>\n{items_formatted}"
-        )
+        # 3. Format result message with numbered items (shared formatter escapes HTML)
+        response_text = format_receipt_text(receipt)
 
         # 4. Attach inline keyboard with Delete/Edit buttons if receipt ID is present
         keyboard = None
@@ -172,21 +160,30 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
         is_503 = getattr(e, "code", None) == 503 or "UNAVAILABLE" in str(e)
 
         if is_503:
-            logging.warning(f"[Gemini 503] Both models busy. Retry {self.request.retries + 1}/2 in 3s...")
-            try:
-                raise self.retry(exc=e, countdown=3)
-            except MaxRetriesExceededError:
-                logging.error(f"[Celery Worker] Fast Fail triggered for blob: {blob_name}")
+            # self.retry() re-raises the original exception once retries are exhausted,
+            # so check the retry budget explicitly before scheduling another attempt.
+            if self.request.retries >= self.max_retries:
+                logging.error(f"[Celery Worker] Retries exhausted, Fast Fail triggered for blob: {blob_name}")
                 error_msg = (
                     "⚠️ <b>The AI servers are currently overloaded</b>\n\n"
-                    "Unable to recognize the receipt within 10 seconds. "
+                    "Unable to recognize the receipt after several attempts. "
                     "Please resubmit the photo in a minute."
                 )
                 asyncio.run(_send_telegram_msg(chat_id, error_msg))
-        else:
-            logging.error(f"Gemini API error: {e}")
-            asyncio.run(_send_telegram_msg(chat_id, f"❌ AI API error: <code>{e}</code>"))
+                return {"status": "failed", "blob_name": blob_name}
 
-    except Exception as e:
-        logging.error(f"Unexpected processing error: {e}")
-        asyncio.run(_send_telegram_msg(chat_id, f"❌ Error processing receipt: <code>{e}</code>"))
+            logging.warning(
+                f"[Gemini 503] Both models busy. Retry {self.request.retries + 1}/{self.max_retries} in 3s..."
+            )
+            raise self.retry(exc=e, countdown=3)
+        else:
+            logging.exception(f"[Celery Worker] Gemini API error for blob: {blob_name}")
+            asyncio.run(_send_telegram_msg(
+                chat_id, "❌ The AI service failed to process your receipt. Please try again later."
+            ))
+
+    except Exception:
+        logging.exception(f"[Celery Worker] Unexpected processing error for blob: {blob_name}")
+        asyncio.run(_send_telegram_msg(
+            chat_id, "❌ Something went wrong while processing your receipt. Please try again later."
+        ))

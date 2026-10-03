@@ -1,22 +1,27 @@
 import asyncio
+import html
 import io
 import logging
 import os
 import math
 from datetime import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
+from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 import calendar
 
 from tasks import process_receipt_task
+from formatting import format_receipt_text
 from db.database import AsyncSessionLocal
 from db.crud import (
-    get_monthly_stats, 
+    init_db,
+    get_monthly_stats,
     delete_receipt_by_id, 
     get_receipt_by_id, 
     update_receipt_field,
@@ -27,7 +32,11 @@ from db.crud import (
     get_user_receipts_count
 )
 from keyboards import (
-    get_main_reply_keyboard, 
+    PRESET_CATEGORIES,
+    MAIN_MENU_BUTTONS,
+    BTN_MONTHLY_EXPENSES,
+    BTN_MY_RECEIPTS,
+    get_main_reply_keyboard,
     get_receipt_inline_keyboard, 
     get_edit_fields_keyboard,
     get_items_selection_keyboard,
@@ -53,6 +62,29 @@ blob_service_client = BlobServiceClient.from_connection_string(
     AZURE_STORAGE_CONNECTION_STRING
 )
 
+ALLOWED_CATEGORIES = {cat_code for _, cat_code in PRESET_CATEGORIES}
+
+# Fields users may edit, mapped to their max text length (None = not a free-text field)
+EDITABLE_RECEIPT_FIELDS = {"store_name": 128, "date": None, "total_amount": None}
+EDITABLE_ITEM_FIELDS = {"name": 255, "total_price": None}
+
+# Numeric(10, 2) columns hold values strictly below 10^8
+MAX_MONEY_AMOUNT = Decimal("100000000")
+
+
+def parse_money_amount(raw_text: str) -> Decimal | None:
+    """Parses a user-entered amount; returns None unless it is a finite number in [0, MAX_MONEY_AMOUNT)."""
+    try:
+        value = Decimal(raw_text.replace(",", ".").replace(" ", ""))
+    except InvalidOperation:
+        return None
+    if not value.is_finite() or value < 0 or value >= MAX_MONEY_AMOUNT:
+        return None
+    value = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if value >= MAX_MONEY_AMOUNT:  # e.g. 99999999.999 rounds up to 10^8
+        return None
+    return value
+
 
 class EditReceiptState(StatesGroup):
     waiting_for_value = State()
@@ -76,27 +108,44 @@ def ensure_container_exists():
         logging.error(f"Error creating container: {e}")
 
 
-def format_receipt_text(receipt) -> str:
-    """Helper to format a Receipt DB entity into an HTML text string with numbered items."""
-
-    sorted_items = sorted(receipt.items, key=lambda x: x.id)
-
-    items_formatted = "\n".join(
-        [
-            f"{i+1}. <b>{item.name}</b> ({item.quantity}x) — <code>{item.total_price} {receipt.currency}</code> <i>[{item.category}]</i>"
-            for i, item in enumerate(sorted_items)
-        ]
-    )
-    return (
-        f"🏪 <b>Store:</b> {receipt.store_name or 'Not specified'}\n"
-        f"📅 <b>Date:</b> {receipt.date or 'Not specified'}\n"
-        f"💰 <b>Total:</b> <code>{receipt.total_amount} {receipt.currency}</code>\n\n"
-        f"🛒 <b>Items:</b>\n{items_formatted}"
-    )
-
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+
+# --- Cancelling Edit Flows ---
+# Registered before all other message handlers so they take precedence over menu buttons and commands.
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """Clears any active FSM state (e.g. an unfinished edit)."""
+    if await state.get_state() is None:
+        await message.answer("Nothing to cancel.", reply_markup=get_main_reply_keyboard())
+        return
+    await state.clear()
+    await message.answer("✖️ Editing cancelled.", reply_markup=get_main_reply_keyboard())
+
+
+@dp.message(
+    StateFilter(EditReceiptState.waiting_for_value, EditItemState.waiting_for_value),
+    F.text.in_(MAIN_MENU_BUTTONS) | F.text.startswith("/"),
+)
+async def interrupt_edit_handler(message: types.Message, state: FSMContext):
+    """Cancels an unfinished edit when the user presses a menu button or sends a command, then lets it run."""
+    await state.clear()
+    await message.answer("✖️ Editing cancelled.")
+    raise SkipHandler()
+
+
+async def get_edit_input_text(message: types.Message) -> str | None:
+    """Returns the stripped text of an edit reply, or asks for text and returns None if there is none."""
+    raw_text = message.text.strip() if message.text else ""
+    if raw_text in MAIN_MENU_BUTTONS or raw_text.startswith("/"):
+        # Already cancelled by interrupt_edit_handler; never store it as a value.
+        return None
+    if not raw_text:
+        await message.answer("❌ Please send the new value as a text message, or /cancel to stop editing.")
+        return None
+    return raw_text
 
 
 @dp.message(Command("start"))
@@ -106,7 +155,8 @@ async def cmd_start(message: types.Message):
         "👋 Hi! I'm an expense tracking bot.\n\n"
         "• Send me a photo of a receipt, and I'll process it.\n"
         "• Click «📊 Monthly Expenses» to view your statistics.\n"
-        "• Click «📜 My Receipts» to browse your saved receipts.",
+        "• Click «📜 My Receipts» to browse your saved receipts.\n"
+        "• Send /cancel to abort an unfinished edit.",
         reply_markup=get_main_reply_keyboard(),
     )
 
@@ -123,7 +173,7 @@ async def send_or_edit_stats(target, user_id: int, year: int, month: int, is_cal
     if total == 0:
         text = f"📊 <b>Expense Statistics for {month_str}</b>\n\nNo saved expenses found for this period."
     else:
-        cat_text = "\n".join([f"• <b>{cat or 'Uncategorized'}</b>: <code>{amount:.2f}</code>" for cat, amount in categories])
+        cat_text = "\n".join([f"• <b>{html.escape(cat or 'Uncategorized')}</b>: <code>{amount:.2f}</code>" for cat, amount in categories])
         text = (
             f"📊 <b>Expense Statistics for {month_str}</b>\n\n"
             f"💰 <b>Total Spent:</b> <code>{total:.2f}</code>\n\n"
@@ -142,7 +192,7 @@ async def send_or_edit_stats(target, user_id: int, year: int, month: int, is_cal
         await target.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
-@dp.message(F.text == "📊 Monthly Expenses")
+@dp.message(F.text == BTN_MONTHLY_EXPENSES)
 @dp.message(Command("stats"))
 async def show_stats_handler(message: types.Message):
     """Handler for the '📊 Monthly Expenses' button or /stats command."""
@@ -200,7 +250,7 @@ async def send_or_edit_receipts_list(target, user_id: int, page: int, is_callbac
         await target.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
-@dp.message(F.text == "📜 My Receipts")
+@dp.message(F.text == BTN_MY_RECEIPTS)
 @dp.message(Command("receipts"))
 async def cmd_receipts(message: types.Message):
     """Handler for the '📜 My Receipts' button or /receipts command."""
@@ -286,6 +336,10 @@ async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSM
     _, field, receipt_id_str = callback.data.split(":")
     receipt_id = int(receipt_id_str)
 
+    if field not in EDITABLE_RECEIPT_FIELDS:
+        await callback.answer("❌ This field cannot be edited.", show_alert=True)
+        return
+
     await state.update_data(
         receipt_id=receipt_id,
         field=field,
@@ -309,20 +363,34 @@ async def select_field_to_edit_handler(callback: types.CallbackQuery, state: FSM
 @dp.message(EditReceiptState.waiting_for_value)
 async def process_new_field_value_handler(message: types.Message, state: FSMContext):
     """Receives the new main field value, updates DB, and refreshes receipt message."""
+    raw_text = await get_edit_input_text(message)
+    if raw_text is None:
+        return
+
     user_data = await state.get_data()
     receipt_id = user_data["receipt_id"]
     field = user_data["field"]
     target_msg_id = user_data["message_id"]
 
-    raw_text = message.text.strip()
+    if field not in EDITABLE_RECEIPT_FIELDS:
+        await state.clear()
+        await message.answer("❌ This field cannot be edited.")
+        return
+
     parsed_value = raw_text
 
     if field == "total_amount":
-        try:
-            parsed_value = float(raw_text.replace(",", "."))
-        except ValueError:
-            await message.answer("❌ Invalid amount format. Please enter a valid number (e.g., 15.50):")
+        parsed_value = parse_money_amount(raw_text)
+        if parsed_value is None:
+            await message.answer(
+                "❌ Invalid amount. Please enter a number from 0 to 99999999.99 (e.g., 15.50):"
+            )
             return
+    elif field == "store_name" and len(raw_text) > EDITABLE_RECEIPT_FIELDS["store_name"]:
+        await message.answer(
+            f"❌ Store name is too long (max {EDITABLE_RECEIPT_FIELDS['store_name']} characters). Please send a shorter one:"
+        )
+        return
     elif field == "date":
         try:
             parsed_value = datetime.strptime(raw_text, "%Y-%m-%d").date()
@@ -385,6 +453,10 @@ async def select_item_field_to_edit(callback: types.CallbackQuery, state: FSMCon
     _, field, item_id_str, receipt_id_str = callback.data.split(":")
     item_id, receipt_id = int(item_id_str), int(receipt_id_str)
 
+    if field not in EDITABLE_ITEM_FIELDS:
+        await callback.answer("❌ This field cannot be edited.", show_alert=True)
+        return
+
     await state.update_data(
         item_id=item_id,
         receipt_id=receipt_id,
@@ -408,26 +480,41 @@ async def select_item_field_to_edit(callback: types.CallbackQuery, state: FSMCon
 @dp.message(EditItemState.waiting_for_value)
 async def process_new_item_field_value(message: types.Message, state: FSMContext):
     """Receives new value for item field, updates DB, and updates message card."""
+    raw_text = await get_edit_input_text(message)
+    if raw_text is None:
+        return
+
     user_data = await state.get_data()
     item_id = user_data["item_id"]
     receipt_id = user_data["receipt_id"]
     field = user_data["field"]
     target_msg_id = user_data["message_id"]
 
-    raw_text = message.text.strip() if message.text else ""
+    if field not in EDITABLE_ITEM_FIELDS:
+        await state.clear()
+        await message.answer("❌ This field cannot be edited.")
+        return
+
     parsed_value = raw_text
 
     if field == "total_price":
-        try:
-            parsed_value = float(raw_text.replace(",", "."))
-        except ValueError:
-            await message.answer("❌ Invalid price format. Please enter a valid number (e.g., 15.50):")
+        parsed_value = parse_money_amount(raw_text)
+        if parsed_value is None:
+            await message.answer(
+                "❌ Invalid price. Please enter a number from 0 to 99999999.99 (e.g., 15.50):"
+            )
             return
+    elif field == "name" and len(raw_text) > EDITABLE_ITEM_FIELDS["name"]:
+        await message.answer(
+            f"❌ Item name is too long (max {EDITABLE_ITEM_FIELDS['name']} characters). Please send a shorter one:"
+        )
+        return
 
     async with AsyncSessionLocal() as session:
         updated_receipt = await update_receipt_item_field(
             session=session,
             item_id=item_id,
+            user_id=message.from_user.id,
             field=field,
             new_value=parsed_value
         )
@@ -464,10 +551,15 @@ async def set_item_category_handler(callback: types.CallbackQuery):
     _, item_id_str, receipt_id_str, new_category = callback.data.split(":")
     item_id, receipt_id = int(item_id_str), int(receipt_id_str)
 
+    if new_category not in ALLOWED_CATEGORIES:
+        await callback.answer("❌ Unknown category.", show_alert=True)
+        return
+
     async with AsyncSessionLocal() as session:
         updated_receipt = await update_receipt_item_field(
             session=session,
             item_id=item_id,
+            user_id=callback.from_user.id,
             field="category",
             new_value=new_category
         )
@@ -536,6 +628,7 @@ async def main():
     logging.basicConfig(level=logging.INFO)
 
     ensure_container_exists()
+    await init_db()
 
     logging.info("Bot started!")
     try:

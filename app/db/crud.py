@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, extract, delete, update, desc
+from sqlalchemy import select, func, extract, delete, desc
 from sqlalchemy.orm import selectinload
 
 from db.database import Base, engine
@@ -86,27 +86,6 @@ async def update_receipt_field(
     return None
 
 
-async def update_receipt_category(
-    session: AsyncSession, receipt_id: int, user_id: int, new_category: str
-) -> Optional[Receipt]:
-    """Updates the category for all items belonging to the receipt."""
-    receipt = await get_receipt_by_id(session, receipt_id, user_id)
-    if not receipt:
-        return None
-
-    # Обновляем категорию всех позиций чека
-    stmt = (
-        update(ReceiptItem)
-        .where(ReceiptItem.receipt_id == receipt_id)
-        .values(category=new_category)
-    )
-    await session.execute(stmt)
-    await session.commit()
-
-    # Перезагружаем чек с обновившимися позициями
-    return await get_receipt_by_id(session, receipt_id, user_id)
-
-
 async def get_monthly_stats(session: AsyncSession, user_id: int, year: int = None, month: int = None):
     """Returns total monthly expenses and category breakdown for the specified user and period."""
     if year is None or month is None:
@@ -149,10 +128,15 @@ async def get_receipt_item_by_id(session: AsyncSession, item_id: int):
     return await session.get(ReceiptItem, item_id)
 
 async def update_receipt_item_field(
-    session: AsyncSession, item_id: int, field: str, new_value
+    session: AsyncSession, item_id: int, user_id: int, field: str, new_value
 ) -> Optional[Receipt]:
-    """Updates a specific field of a receipt item, recalculates total receipt amount, and returns parent receipt."""
-    item = await session.get(ReceiptItem, item_id)
+    """Updates a specific field of a receipt item owned by the user, recalculates total receipt amount, and returns parent receipt."""
+    item_stmt = (
+        select(ReceiptItem)
+        .join(Receipt, Receipt.id == ReceiptItem.receipt_id)
+        .where(ReceiptItem.id == item_id, Receipt.user_id == user_id)
+    )
+    item = (await session.execute(item_stmt)).scalar_one_or_none()
     if not item:
         return None
 
@@ -164,7 +148,7 @@ async def update_receipt_item_field(
     stmt = (
         select(Receipt)
         .options(selectinload(Receipt.items))
-        .where(Receipt.id == item.receipt_id)
+        .where(Receipt.id == item.receipt_id, Receipt.user_id == user_id)
     )
     result = await session.execute(stmt)
     receipt = result.scalar_one_or_none()

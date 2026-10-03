@@ -12,14 +12,18 @@ PRESET_CATEGORIES = [
     ("❓ Other", "Other"),
 ]
 
+BTN_MONTHLY_EXPENSES = "📊 Monthly Expenses"
+BTN_MY_RECEIPTS = "📜 My Receipts"
+MAIN_MENU_BUTTONS = (BTN_MONTHLY_EXPENSES, BTN_MY_RECEIPTS)
+
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     """Returns the main persistent reply keyboard located beneath the input field."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📊 Monthly Expenses"),
-                KeyboardButton(text="📜 My Receipts")
+                KeyboardButton(text=BTN_MONTHLY_EXPENSES),
+                KeyboardButton(text=BTN_MY_RECEIPTS)
             ]
         ],
         resize_keyboard=True
