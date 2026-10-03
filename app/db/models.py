@@ -1,4 +1,5 @@
 from datetime import datetime, date
+from decimal import Decimal
 from typing import List, Optional
 from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -28,7 +29,7 @@ class Receipt(Base):
     )
     store_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, index=True)
-    total_amount: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("0.00"))
     currency: Mapped[str] = mapped_column(String(10), default="CZK")
     blob_name: Mapped[str] = mapped_column(String(255), unique=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -49,8 +50,8 @@ class ReceiptItem(Base):
         ForeignKey("receipts.id", ondelete="CASCADE"), index=True
     )
     name: Mapped[str] = mapped_column(String(255))
-    quantity: Mapped[float] = mapped_column(Numeric(10, 3), default=1.0)
-    total_price: Mapped[float] = mapped_column(Numeric(10, 2))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=Decimal("1.000"))
+    total_price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     category: Mapped[str] = mapped_column(String(64), default="Other", index=True)
 
     receipt: Mapped["Receipt"] = relationship(back_populates="items")

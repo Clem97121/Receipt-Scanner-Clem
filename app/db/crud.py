@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, extract, delete, desc
@@ -7,6 +8,15 @@ from sqlalchemy.orm import selectinload
 from db.database import Base, engine
 from db.models import Receipt, ReceiptItem, User
 from schemas import ReceiptData
+
+
+MONEY_QUANT = Decimal("0.01")
+QUANTITY_QUANT = Decimal("0.001")
+
+
+def to_decimal(value, quant: Decimal = MONEY_QUANT) -> Decimal:
+    """Converts a float/str/Decimal to a Decimal rounded to the column scale (via str to avoid binary float artifacts)."""
+    return Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP)
 
 
 async def init_db():
@@ -36,7 +46,7 @@ async def save_receipt_to_db(
         user_id=user_id,
         store_name=receipt_data.store_name,
         date=receipt_date,
-        total_amount=receipt_data.total_amount,
+        total_amount=to_decimal(receipt_data.total_amount),
         currency=receipt_data.currency,
         blob_name=blob_name,
     )
@@ -48,8 +58,8 @@ async def save_receipt_to_db(
             ReceiptItem(
                 receipt_id=receipt.id,
                 name=item.name,
-                quantity=item.quantity,
-                total_price=item.total_price,
+                quantity=to_decimal(item.quantity, QUANTITY_QUANT),
+                total_price=to_decimal(item.total_price),
                 category=item.category,
             )
         )
@@ -98,7 +108,7 @@ async def get_monthly_stats(session: AsyncSession, user_id: int, year: int = Non
         extract('month', Receipt.date) == month
     )
     total_result = await session.execute(total_stmt)
-    total_sum = total_result.scalar() or 0.0
+    total_sum = Decimal(str(total_result.scalar() or 0))
 
     cat_stmt = (
         select(ReceiptItem.category, func.sum(ReceiptItem.total_price))
@@ -111,7 +121,7 @@ async def get_monthly_stats(session: AsyncSession, user_id: int, year: int = Non
         .group_by(ReceiptItem.category)
     )
     cat_result = await session.execute(cat_stmt)
-    categories = cat_result.all()
+    categories = [(cat, Decimal(str(amount or 0))) for cat, amount in cat_result.all()]
 
     return total_sum, categories
 
@@ -154,7 +164,7 @@ async def update_receipt_item_field(
     receipt = result.scalar_one_or_none()
 
     if receipt:
-        receipt.total_amount = sum(float(i.total_price) for i in receipt.items)
+        receipt.total_amount = sum((Decimal(i.total_price) for i in receipt.items), Decimal("0.00"))
 
         await session.commit()
         await session.refresh(receipt)
