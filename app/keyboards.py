@@ -14,7 +14,9 @@ PRESET_CATEGORIES = [
 
 BTN_MONTHLY_EXPENSES = "📊 Monthly Expenses"
 BTN_MY_RECEIPTS = "📜 My Receipts"
-MAIN_MENU_BUTTONS = (BTN_MONTHLY_EXPENSES, BTN_MY_RECEIPTS)
+BTN_FAMILY = "👨‍👩‍👧 Family"
+BTN_ADD_EXPENSE = "➕ Add expense"
+MAIN_MENU_BUTTONS = (BTN_MONTHLY_EXPENSES, BTN_MY_RECEIPTS, BTN_ADD_EXPENSE, BTN_FAMILY)
 
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -24,9 +26,62 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text=BTN_MONTHLY_EXPENSES),
                 KeyboardButton(text=BTN_MY_RECEIPTS)
+            ],
+            [
+                KeyboardButton(text=BTN_ADD_EXPENSE),
+                KeyboardButton(text=BTN_FAMILY)
             ]
         ],
         resize_keyboard=True
+    )
+
+
+def get_manual_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Cancel button for the manual expense form."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Cancel", callback_data="manual_cancel")]]
+    )
+
+
+def get_manual_category_keyboard() -> InlineKeyboardMarkup:
+    """Category choice for a manual expense."""
+    buttons = []
+    for i in range(0, len(PRESET_CATEGORIES), 2):
+        buttons.append([
+            InlineKeyboardButton(text=label, callback_data=f"manual_cat:{cat_code}")
+            for label, cat_code in PRESET_CATEGORIES[i:i+2]
+        ])
+    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="manual_cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_manual_description_keyboard() -> InlineKeyboardMarkup:
+    """Lets the user skip the optional description of a manual expense."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="⏭ Skip", callback_data="manual_skip_description"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="manual_cancel")
+        ]]
+    )
+
+
+def get_family_keyboard(in_family: bool) -> InlineKeyboardMarkup:
+    """Returns the family screen actions."""
+    buttons = [[InlineKeyboardButton(text="🔗 Invite to family", callback_data="family_invite")]]
+    if in_family:
+        buttons.append([InlineKeyboardButton(text="🚪 Leave family", callback_data="family_leave")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_family_leave_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Asks the user to confirm leaving the family."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Yes, leave", callback_data="family_leave_confirm"),
+                InlineKeyboardButton(text="❌ Cancel", callback_data="family_menu")
+            ]
+        ]
     )
 
 
@@ -59,11 +114,14 @@ def get_receipts_list_keyboard(receipts, page: int, total_pages: int) -> InlineK
     keyboard = []
     
     for r in receipts:
-        store = r.store_name or "Unknown Store"
+        if r.blob_name is None:
+            store = f"✍️ {r.store_name or 'Manual expense'}"
+        else:
+            store = f"🏪 {r.store_name or 'Unknown Store'}"
         total = f"{r.total_amount:.2f} {r.currency}" if r.total_amount is not None else ""
         date = str(r.date) if r.date else ""
-        
-        btn_text = f"🏪 {store} | {total} | {date}"
+
+        btn_text = f"{store} | {total} | {date}"
         if len(btn_text) > 36:
             btn_text = btn_text[:33] + "..."
             

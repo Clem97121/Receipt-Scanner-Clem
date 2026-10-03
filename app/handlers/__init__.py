@@ -1,6 +1,6 @@
 from aiogram import Router
 
-from handlers import common, edit, photo, receipts, stats
+from handlers import common, edit, family, manual, photo, receipts, stats
 
 
 def get_routers() -> list[Router]:
@@ -13,6 +13,8 @@ def get_routers() -> list[Router]:
         common.router,
         stats.router,
         receipts.router,
+        family.router,
+        manual.router,
         edit.router,
         photo.router,
     ]

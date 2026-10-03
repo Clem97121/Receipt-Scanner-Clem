@@ -36,7 +36,9 @@ celery_app = Celery("receipt_tasks", broker=REDIS_URL, backend=REDIS_URL)
 blob_service_client = BlobServiceClient.from_connection_string(
     AZURE_STORAGE_CONNECTION_STRING
 )
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# Without a timeout a hung Gemini request would block the worker forever
+GEMINI_TIMEOUT_MS = 60_000
+ai_client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS))
 
 
 def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MODEL) -> ReceiptData:
@@ -91,7 +93,7 @@ def _delete_unsaved_photo(blob_name: str) -> None:
         logging.exception(f"[Celery Worker] Failed to delete unsaved photo: {blob_name}")
 
 
-async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: ReceiptData):
+async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: str, receipt: ReceiptData):
     """Executes DB saving and Telegram notification in a SINGLE asyncio Event Loop."""
     try:
         # 1. Check if image is actually a receipt
@@ -123,11 +125,11 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
             async with AsyncSessionLocal() as session:
                 db_receipt = await save_receipt_to_db(
                     session=session,
-                    user_id=chat_id,
+                    user_id=user_id,
                     blob_name=blob_name,
                     receipt_data=receipt,
                 )
-            logging.info(f"[Celery Worker] Saved receipt to DB for user {chat_id}")
+            logging.info(f"[Celery Worker] Saved receipt to DB for user {user_id}")
 
         except IntegrityError:
             logging.warning(f"[Celery Worker] Duplicate receipt detected for blob: {blob_name}")
@@ -152,8 +154,13 @@ async def _process_and_notify_pipeline(chat_id: int, blob_name: str, receipt: Re
         await engine.dispose()
 
 
-@celery_app.task(bind=True, max_retries=2)
-def process_receipt_task(self, blob_name: str, chat_id: int):
+@celery_app.task(bind=True, max_retries=2, soft_time_limit=180, time_limit=240)
+def process_receipt_task(self, blob_name: str, chat_id: int, user_id: int | None = None):
+    """Recognizes a receipt photo and saves it for user_id; replies go to chat_id.
+
+    user_id defaults to chat_id for tasks queued by older bot versions (private chats only).
+    """
+    user_id = user_id or chat_id
     logging.info(f"[Celery Worker] Starting Gemini analysis for: {blob_name}")
 
     try:
@@ -175,7 +182,7 @@ def process_receipt_task(self, blob_name: str, chat_id: int):
                 raise e
 
         # 3. Run entire DB + Telegram async flow in ONE single event loop
-        asyncio.run(_process_and_notify_pipeline(chat_id, blob_name, receipt))
+        asyncio.run(_process_and_notify_pipeline(chat_id, user_id, blob_name, receipt))
         
         logging.info(f"[Celery Worker] Task completed for chat {chat_id}")
         return {"status": "completed", "blob_name": blob_name}

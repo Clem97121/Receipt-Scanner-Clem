@@ -22,8 +22,8 @@ os.environ.update(
 import pytest
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.storage.base import StorageKey
-from aiogram.methods import SendMessage
-from aiogram.types import Message, Update
+from aiogram.methods import GetMe, SendMessage
+from aiogram.types import Message, Update, User as TelegramUser
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -47,6 +47,8 @@ class FakeSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
+        if isinstance(method, GetMe):
+            return TelegramUser(id=bot.id, is_bot=True, first_name="Receipt Bot", username="test_receipt_bot")
         if isinstance(method, SendMessage):
             return Message.model_validate({
                 "message_id": 999,
@@ -78,13 +80,15 @@ class TelegramHarness:
         return self._update_id
 
     async def send(self, user_id: int, text: str | None = None, sticker: bool = False,
-                   photo_file_id: str | None = None) -> list:
-        """Sends a message from the user and returns the Bot API calls it caused."""
+                   photo_file_id: str | None = None, photo_unique_id: str | None = None,
+                   chat_id: int | None = None) -> list:
+        """Sends a message from the user (in a private chat unless chat_id is given) and returns the Bot API calls it caused."""
+        chat = {"id": user_id, "type": "private"} if chat_id is None else {"id": chat_id, "type": "group", "title": "Group"}
         message = {
             "message_id": self._next_id(),
             "date": int(time.time()),
-            "chat": {"id": user_id, "type": "private"},
-            "from": {"id": user_id, "is_bot": False, "first_name": "Test"},
+            "chat": chat,
+            "from": {"id": user_id, "is_bot": False, "first_name": f"Name{user_id}"},
         }
         if text is not None:
             message["text"] = text
@@ -96,14 +100,17 @@ class TelegramHarness:
                 "width": 1, "height": 1, "is_animated": False, "is_video": False,
             }
         if photo_file_id:
-            message["photo"] = [{"file_id": photo_file_id, "file_unique_id": photo_file_id, "width": 800, "height": 1200}]
+            message["photo"] = [{
+                "file_id": photo_file_id, "file_unique_id": photo_unique_id or photo_file_id,
+                "width": 800, "height": 1200,
+            }]
         return await self._feed({"update_id": self._next_id(), "message": message})
 
     async def click(self, user_id: int, data: str) -> list:
         """Presses an inline button with the given callback data and returns the Bot API calls it caused."""
         callback = {
             "id": str(self._next_id()),
-            "from": {"id": user_id, "is_bot": False, "first_name": "Test"},
+            "from": {"id": user_id, "is_bot": False, "first_name": f"Name{user_id}"},
             "chat_instance": "test",
             "data": data,
             "message": {

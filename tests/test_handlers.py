@@ -75,7 +75,7 @@ async def test_menu_button_cancels_edit_and_still_works(tg):
     await tg.click(OWNER_ID, f"edit_field:store_name:{RECEIPT_ID}")
     sent = texts(await tg.send(OWNER_ID, "📊 Monthly Expenses"))
     assert await tg.state(OWNER_ID) is None
-    assert any("cancelled" in t for t in sent)
+    assert any("cancelled" in t.lower() for t in sent)
     assert any("Expense Statistics" in t for t in sent)
     assert (await load_receipt(RECEIPT_ID)).store_name == "Shop"
 
@@ -98,7 +98,7 @@ async def test_cancel_command(tg):
     await tg.click(OWNER_ID, f"edit_item_field:name:{ITEM_ID}:{RECEIPT_ID}")
     sent = texts(await tg.send(OWNER_ID, "/cancel"))
     assert await tg.state(OWNER_ID) is None
-    assert any("cancelled" in t for t in sent)
+    assert any("cancelled" in t.lower() for t in sent)
 
     sent = texts(await tg.send(OWNER_ID, "/cancel"))
     assert any("Nothing to cancel" in t for t in sent)

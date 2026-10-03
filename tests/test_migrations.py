@@ -59,17 +59,38 @@ def test_running_migrations_twice_is_safe(database_url):
 
 
 def test_legacy_create_all_database_is_stamped_and_keeps_data(database_url):
-    def create_legacy_schema(connection):
-        Base.metadata.create_all(connection)
+    # Production was created by create_all() with the models of revision 0001 and has no alembic_version table
+    from alembic import command
+
+    command.upgrade(_alembic_config(database_url), BASELINE_REVISION)
+
+    def make_legacy(connection):
+        connection.execute(text("DROP TABLE alembic_version"))
         connection.execute(text("INSERT INTO users (telegram_id) VALUES (42)"))
 
-    _run(database_url, create_legacy_schema)
+    _run(database_url, make_legacy)
 
     run_migrations(database_url)
 
-    assert _run(database_url, _current_revision) in (
-        BASELINE_REVISION,
-        ScriptDirectory.from_config(_alembic_config(database_url)).get_current_head(),
-    )
+    assert _run(database_url, _current_revision) == ScriptDirectory.from_config(
+        _alembic_config(database_url)
+    ).get_current_head()
     assert _run(database_url, lambda c: c.execute(text("SELECT telegram_id FROM users")).scalars().all()) == [42]
     assert _run(database_url, _schema_diff) == []
+
+
+def test_backfill_gives_undated_receipts_their_upload_date(database_url):
+    from alembic import command
+
+    command.upgrade(_alembic_config(database_url), "0001")
+
+    def insert_undated(connection):
+        connection.execute(text("INSERT INTO users (telegram_id) VALUES (1)"))
+        connection.execute(text(
+            "INSERT INTO receipts (user_id, date, total_amount, currency, blob_name, created_at) "
+            "VALUES (1, NULL, 5, 'CZK', 'b', '2026-02-14 10:00:00')"
+        ))
+
+    _run(database_url, insert_undated)
+    run_migrations(database_url)
+    assert str(_run(database_url, lambda c: c.execute(text("SELECT date FROM receipts")).scalar_one())) == "2026-02-14"

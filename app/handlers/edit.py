@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 
 from db.crud import get_receipt_by_id, update_receipt_field, update_receipt_item_field
 from db.database import AsyncSessionLocal
-from formatting import format_receipt_text
+from handlers.cards import receipt_card
 from keyboards import (
     MAIN_MENU_BUTTONS,
     PRESET_CATEGORIES,
@@ -155,7 +155,7 @@ async def process_new_field_value_handler(message: types.Message, state: FSMCont
         )
 
     if updated_receipt:
-        formatted_text = format_receipt_text(updated_receipt)
+        formatted_text = await receipt_card(updated_receipt, message.from_user.id)
         await message.bot.edit_message_text(
             text=formatted_text,
             chat_id=message.chat.id,
@@ -267,7 +267,7 @@ async def process_new_item_field_value(message: types.Message, state: FSMContext
         )
 
     if updated_receipt:
-        formatted_text = format_receipt_text(updated_receipt)
+        formatted_text = await receipt_card(updated_receipt, message.from_user.id)
         await message.bot.edit_message_text(
             text=formatted_text,
             chat_id=message.chat.id,
@@ -312,7 +312,7 @@ async def set_item_category_handler(callback: types.CallbackQuery):
         )
 
     if updated_receipt:
-        formatted_text = format_receipt_text(updated_receipt)
+        formatted_text = await receipt_card(updated_receipt, callback.from_user.id)
         await callback.message.edit_text(
             text=formatted_text,
             parse_mode="HTML",

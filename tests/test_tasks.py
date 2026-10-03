@@ -99,7 +99,7 @@ def test_unreliable_ai_numbers_are_not_saved(db, monkeypatch, storage):
     send = AsyncMock()
     monkeypatch.setattr(tasks, "_send_telegram_msg", send)
 
-    asyncio.run(tasks._process_and_notify_pipeline(CHAT_ID, "bad-blob", receipt))
+    asyncio.run(tasks._process_and_notify_pipeline(CHAT_ID, CHAT_ID, "bad-blob", receipt))
 
     assert "couldn't read the amounts" in send.call_args.args[1]
     assert send.call_args.kwargs.get("reply_markup") is None
@@ -122,7 +122,7 @@ def test_successful_receipt_is_saved_and_sent_with_keyboard(db, monkeypatch, sto
     monkeypatch.setattr(tasks, "_send_telegram_msg", send)
 
     # The db fixture is async; run the sync pipeline in a fresh loop like the worker does
-    asyncio.run(tasks._process_and_notify_pipeline(CHAT_ID, "new-blob", receipt))
+    asyncio.run(tasks._process_and_notify_pipeline(CHAT_ID, CHAT_ID, "new-blob", receipt))
 
     text = send.call_args.args[1]
     keyboard = send.call_args.kwargs["reply_markup"]
@@ -130,3 +130,43 @@ def test_successful_receipt_is_saved_and_sent_with_keyboard(db, monkeypatch, sto
     receipt_id = int(keyboard.inline_keyboard[0][0].callback_data.split(":")[1])
     assert asyncio.run(load_receipt(receipt_id)).store_name == "<Shop>"
     assert storage.deleted == []
+
+
+def test_group_receipt_is_saved_for_the_sender_and_reply_goes_to_the_group(db, monkeypatch):
+    receipt = ReceiptData(store_name="Shop", currency="CZK", total_amount=1, items=[
+        {"name": "milk", "total_price": 1, "category": "Groceries"},
+    ])
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(return_value=receipt))
+    send = AsyncMock()
+    monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+
+    tasks.process_receipt_task.push_request(retries=0)
+    try:
+        tasks.process_receipt_task.run("1/group-photo.jpg", -100500, 1)
+    finally:
+        tasks.process_receipt_task.pop_request()
+
+    assert send.call_args.args[0] == -100500
+    receipt_id = int(send.call_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data.split(":")[1])
+    assert asyncio.run(load_receipt(receipt_id)).user_id == 1
+
+
+def test_task_queued_by_old_bot_version_falls_back_to_chat_id(db, monkeypatch):
+    receipt = ReceiptData(currency="CZK", total_amount=1, items=[])
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(return_value=receipt))
+    send = AsyncMock()
+    monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+
+    tasks.process_receipt_task.push_request(retries=0)
+    try:
+        tasks.process_receipt_task.run("1/old-task.jpg", 1)
+    finally:
+        tasks.process_receipt_task.pop_request()
+
+    receipt_id = int(send.call_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data.split(":")[1])
+    assert asyncio.run(load_receipt(receipt_id)).user_id == 1
+
+
+def test_gemini_requests_have_a_timeout():
+    assert tasks.ai_client._api_client._http_options.timeout == tasks.GEMINI_TIMEOUT_MS
+    assert tasks.process_receipt_task.time_limit and tasks.process_receipt_task.soft_time_limit

@@ -67,6 +67,34 @@ async def test_monthly_stats_are_decimal(db):
     assert all(isinstance(amount, Decimal) for _, amount in categories)
 
 
+async def test_receipt_without_date_gets_today_and_counts_in_stats(db):
+    from timeutils import local_today
+
+    data = _ai_receipt()
+    data.date = None
+    async with AsyncSessionLocal() as session:
+        saved = await save_receipt_to_db(session, OWNER_ID, "undated-blob", data)
+    assert (await load_receipt(saved.id)).date == local_today()
+
+    today = local_today()
+    async with AsyncSessionLocal() as session:
+        total, _ = await get_monthly_stats(session, OWNER_ID, today.year, today.month)
+    assert total == Decimal("0.30")
+
+
+async def test_month_boundaries(db):
+    from db.models import Receipt
+
+    async with AsyncSessionLocal() as session:
+        for blob, day, amount in [("jan-31", date(2026, 1, 31), 1), ("feb-1", date(2026, 2, 1), 10),
+                                  ("dec-31", date(2026, 12, 31), 100), ("next-jan-1", date(2027, 1, 1), 1000)]:
+            session.add(Receipt(user_id=OWNER_ID, date=day, total_amount=amount, currency="CZK", blob_name=blob))
+        await session.commit()
+        jan, _ = await get_monthly_stats(session, OWNER_ID, 2026, 1)
+        dec, _ = await get_monthly_stats(session, OWNER_ID, 2026, 12)
+    assert jan == Decimal("1") and dec == Decimal("100")
+
+
 async def test_empty_month_stats(db):
     async with AsyncSessionLocal() as session:
         total, categories = await get_monthly_stats(session, OWNER_ID, 2000, 1)

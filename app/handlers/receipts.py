@@ -10,7 +10,7 @@ from db.crud import (
     get_user_receipts_paginated,
 )
 from db.database import AsyncSessionLocal
-from formatting import format_receipt_text
+from handlers.cards import receipt_card
 from keyboards import BTN_MY_RECEIPTS, get_receipt_inline_keyboard, get_receipts_list_keyboard
 from storage import delete_receipt_photo
 
@@ -86,7 +86,7 @@ async def view_receipt_from_list_handler(callback: types.CallbackQuery):
         await callback.answer("❌ Receipt not found.", show_alert=True)
         return
 
-    formatted_text = format_receipt_text(receipt)
+    formatted_text = await receipt_card(receipt, callback.from_user.id)
     keyboard = get_receipt_inline_keyboard(receipt_id, back_page=page)
 
     await callback.message.edit_text(
@@ -105,10 +105,11 @@ async def delete_receipt_handler(callback: types.CallbackQuery):
     receipt_id = int(callback.data.split(":")[1])
 
     async with AsyncSessionLocal() as session:
-        deleted_blob_name = await delete_receipt_by_id(session, receipt_id, callback.from_user.id)
+        deleted, blob_name = await delete_receipt_by_id(session, receipt_id, callback.from_user.id)
 
-    if deleted_blob_name is not None:
-        await delete_receipt_photo(deleted_blob_name)
+    if deleted:
+        if blob_name is not None:
+            await delete_receipt_photo(blob_name)
         await callback.answer("Receipt deleted successfully!")
         await callback.message.edit_text("🗑 <b>This receipt has been deleted from the system.</b>", parse_mode="HTML")
     else:

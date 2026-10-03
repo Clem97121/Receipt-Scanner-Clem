@@ -24,20 +24,28 @@ def _quantity(value) -> str:
     return text
 
 
-def format_receipt_text(receipt) -> str:
+def format_receipt_text(receipt, added_by: str | None = None) -> str:
     """Formats a receipt (DB Receipt entity or pydantic ReceiptData) into an HTML text string with numbered items.
 
     DB items are sorted by id; pydantic items (which have no id) keep their original order.
+    added_by is shown for receipts that another family member added.
     """
     items = list(receipt.items)
     if all(getattr(item, "id", None) is not None for item in items):
         items.sort(key=lambda x: x.id)
 
     currency = _esc(receipt.currency)
+    author_line = f"👤 <b>Added by:</b> {_esc(added_by)}\n" if added_by else ""
+    # Manual expenses are saved without a photo (blob_name is None); AI results have no blob_name at all
+    if getattr(receipt, "blob_name", "") is None:
+        title_line = f"✍️ <b>Manual expense:</b> {_esc(receipt.store_name or 'No description')}\n"
+    else:
+        title_line = f"🏪 <b>Store:</b> {_esc(receipt.store_name or 'Not specified')}\n"
     header = (
-        f"🏪 <b>Store:</b> {_esc(receipt.store_name or 'Not specified')}\n"
+        title_line +
         f"📅 <b>Date:</b> {_esc(receipt.date or 'Not specified')}\n"
-        f"💰 <b>Total:</b> <code>{_money(receipt.total_amount)} {currency}</code>\n\n"
+        f"💰 <b>Total:</b> <code>{_money(receipt.total_amount)} {currency}</code>\n"
+        f"{author_line}\n"
         f"🛒 <b>Items:</b>\n"
     )
 
