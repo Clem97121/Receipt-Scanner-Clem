@@ -30,16 +30,21 @@ EDITABLE_ITEM_FIELDS = {"name": 255, "total_price": None}
 MAX_MONEY_AMOUNT = Decimal("100000000")
 
 
-def parse_money_amount(raw_text: str) -> Decimal | None:
-    """Parses a user-entered amount; returns None unless it is a finite number in [0, MAX_MONEY_AMOUNT)."""
+def parse_money_amount(raw_text: str, allow_negative: bool = False) -> Decimal | None:
+    """Parses a user-entered amount; returns None unless it is a finite number with abs value below MAX_MONEY_AMOUNT.
+
+    Negative amounts are only accepted with allow_negative (item lines can be discounts).
+    """
     try:
         value = Decimal(raw_text.replace(",", ".").replace(" ", ""))
     except InvalidOperation:
         return None
-    if not value.is_finite() or value < 0 or value >= MAX_MONEY_AMOUNT:
+    if not value.is_finite() or abs(value) >= MAX_MONEY_AMOUNT:
+        return None
+    if value < 0 and not allow_negative:
         return None
     value = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    if value >= MAX_MONEY_AMOUNT:  # e.g. 99999999.999 rounds up to 10^8
+    if abs(value) >= MAX_MONEY_AMOUNT:  # e.g. 99999999.999 rounds up to 10^8
         return None
     return value
 
@@ -214,7 +219,7 @@ async def select_item_field_to_edit(callback: types.CallbackQuery, state: FSMCon
 
     prompt_messages = {
         "name": "Please send the new item name:",
-        "total_price": "Please send the new total price for this item (e.g., 25.50):"
+        "total_price": "Please send the new total price for this item (e.g., 25.50, or -3.00 for a discount):"
     }
 
     await callback.message.answer(
@@ -245,10 +250,11 @@ async def process_new_item_field_value(message: types.Message, state: FSMContext
     parsed_value = raw_text
 
     if field == "total_price":
-        parsed_value = parse_money_amount(raw_text)
+        parsed_value = parse_money_amount(raw_text, allow_negative=True)
         if parsed_value is None:
             await message.answer(
-                "❌ Invalid price. Please enter a number from 0 to 99999999.99 (e.g., 15.50):"
+                "❌ Invalid price. Please enter a number from -99999999.99 to 99999999.99 "
+                "(e.g., 15.50, or -3.00 for a discount):"
             )
             return
     elif field == "name" and len(raw_text) > EDITABLE_ITEM_FIELDS["name"]:

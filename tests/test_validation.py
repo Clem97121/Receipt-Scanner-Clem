@@ -28,6 +28,20 @@ def test_parse_money_amount_rejects_invalid_values(raw):
     assert parse_money_amount(raw) is None
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("-3", Decimal("-3.00")),
+    ("-12,345", Decimal("-12.35")),
+    ("15.50", Decimal("15.50")),
+])
+def test_parse_money_amount_allows_negative_for_discounts(raw, expected):
+    assert parse_money_amount(raw, allow_negative=True) == expected
+
+
+@pytest.mark.parametrize("raw", ["-100000000", "-1e30", "-nan", "-inf", "abc"])
+def test_parse_money_amount_rejects_invalid_negative_values(raw):
+    assert parse_money_amount(raw, allow_negative=True) is None
+
+
 def test_allowed_categories_match_ai_schema():
     """Preset keyboard categories must stay in sync with the categories Gemini is allowed to return."""
     ai_categories = set(AiReceiptItem.model_fields["category"].annotation.__args__)

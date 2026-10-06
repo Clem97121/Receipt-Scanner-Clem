@@ -43,7 +43,7 @@ def test_invalid_total_is_a_problem(total):
 
 
 @pytest.mark.parametrize("item", [
-    {"name": "x", "total_price": -0.01, "category": "Other"},
+    {"name": "x", "total_price": -1e9, "category": "Other"},
     {"name": "x", "total_price": float("nan"), "category": "Other"},
     {"name": "x", "total_price": 1e9, "category": "Other"},
     {"name": "x", "quantity": 0, "total_price": 1, "category": "Other"},
@@ -52,6 +52,16 @@ def test_invalid_total_is_a_problem(total):
 ])
 def test_invalid_item_numbers_are_a_problem(item):
     assert _receipt(items=[item]).find_problems()
+
+
+def test_discount_lines_are_allowed():
+    receipt = _receipt(total_amount=17, items=[
+        {"name": "Cheese", "total_price": 20, "category": "Groceries"},
+        {"name": "Discount", "total_price": -3.0, "category": "Groceries"},
+        {"name": "Coupon", "total_price": -20.0, "category": "Other"},
+        {"name": "Wine", "total_price": 20, "category": "Groceries"},
+    ])
+    assert receipt.find_problems() == []
 
 
 def test_too_many_items_is_a_problem():

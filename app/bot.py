@@ -23,6 +23,8 @@ dp.include_routers(*get_routers())
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+    # The Azure SDK logs every HTTP request with all headers at INFO level
+    logging.getLogger("azure").setLevel(logging.WARNING)
 
     ensure_container_exists()
     await asyncio.to_thread(run_migrations)

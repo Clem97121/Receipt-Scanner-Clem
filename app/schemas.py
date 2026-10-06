@@ -12,10 +12,12 @@ MAX_QUANTITY = 10_000_000  # Numeric(10, 3) holds values strictly below 10^7
 MAX_ITEMS = 200
 
 
-def _is_valid_number(value: float, upper_bound: float, allow_zero: bool = True) -> bool:
+def _is_valid_number(value: float, upper_bound: float, allow_zero: bool = True, allow_negative: bool = False) -> bool:
     """Checks that a number is finite and fits the DB column range."""
-    if not math.isfinite(value) or value >= upper_bound:
+    if not math.isfinite(value) or abs(value) >= upper_bound:
         return False
+    if allow_negative:
+        return True
     return value >= 0 if allow_zero else value > 0
 
 
@@ -25,7 +27,7 @@ class ReceiptItem(BaseModel):
     price_per_unit: Optional[float] = Field(
         default=None, description="Price per unit"
     )
-    total_price: float = Field(description="Total cost for this item")
+    total_price: float = Field(description="Total cost for this item; negative for discounts, coupons and returned deposits")
     category: Literal[
         "Groceries",
         "Cafe & Dining", 
@@ -88,7 +90,8 @@ class ReceiptData(BaseModel):
         if len(self.items) > MAX_ITEMS:
             problems.append(f"too many items: {len(self.items)}")
         for index, item in enumerate(self.items):
-            if not _is_valid_number(item.total_price, MAX_MONEY_AMOUNT):
+            # Discounts, coupons and returned deposits are separate lines with a negative price
+            if not _is_valid_number(item.total_price, MAX_MONEY_AMOUNT, allow_negative=True):
                 problems.append(f"item {index}: invalid total_price {item.total_price}")
             if not _is_valid_number(item.quantity, MAX_QUANTITY, allow_zero=False):
                 problems.append(f"item {index}: invalid quantity {item.quantity}")

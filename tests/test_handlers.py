@@ -162,9 +162,24 @@ async def test_invalid_date_is_rejected(tg):
 
 async def test_item_price_updates_receipt_total(tg):
     await tg.click(OWNER_ID, f"edit_item_field:total_price:{ITEM_ID}:{RECEIPT_ID}")
-    await tg.send(OWNER_ID, "-1")
+    await tg.send(OWNER_ID, "abc")
     assert await tg.state(OWNER_ID) is not None
     await tg.send(OWNER_ID, "7.5")
     receipt = await load_receipt(RECEIPT_ID)
     assert str(receipt.items[0].total_price) == "7.50"
     assert str(receipt.total_amount) == "7.50"
+
+
+async def test_item_price_can_be_a_discount(tg):
+    await tg.click(OWNER_ID, f"edit_item_field:total_price:{ITEM_ID}:{RECEIPT_ID}")
+    await tg.send(OWNER_ID, "-2,5")
+    assert await tg.state(OWNER_ID) is None
+    receipt = await load_receipt(RECEIPT_ID)
+    assert str(receipt.items[0].total_price) == "-2.50"
+
+
+async def test_receipt_total_still_cannot_be_negative(tg):
+    await tg.click(OWNER_ID, f"edit_field:total_amount:{RECEIPT_ID}")
+    await tg.send(OWNER_ID, "-5")
+    assert await tg.state(OWNER_ID) is not None
+    assert str((await load_receipt(RECEIPT_ID)).total_amount) == "3.00"

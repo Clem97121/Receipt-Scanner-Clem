@@ -2,6 +2,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from google.genai.errors import ClientError, ServerError
 from sqlalchemy import select
@@ -47,9 +48,18 @@ def test_503_schedules_retry_while_budget_left(monkeypatch, sent, storage):
 
     with pytest.raises(RuntimeError, match="retry scheduled"):
         _run_task(retries=0)
-    assert retry.call_args.kwargs["countdown"] == 3
-    assert sent == []
+    assert retry.call_args.kwargs["countdown"] == tasks.RETRY_COUNTDOWN_SECONDS
+    assert len(sent) == 1 and "responding slowly" in sent[0]  # told once, on the first retry
     assert storage.deleted == []  # the photo is still needed for the retry
+
+
+def test_second_retry_does_not_repeat_the_slow_notice(monkeypatch, sent):
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=_overloaded()))
+    monkeypatch.setattr(tasks.process_receipt_task, "retry", MagicMock(side_effect=RuntimeError("retry scheduled")))
+
+    with pytest.raises(RuntimeError, match="retry scheduled"):
+        _run_task(retries=1)
+    assert sent == []
 
 
 def test_503_after_last_retry_notifies_user(monkeypatch, sent, storage):
@@ -73,6 +83,52 @@ def test_primary_model_503_falls_back_to_secondary(monkeypatch, sent, storage):
     assert analyze.call_args_list[1].kwargs["model_name"] == tasks.FALLBACK_MODEL
     assert len(sent) == 1 and "doesn't look like a receipt" in sent[0]
     assert storage.deleted == [BLOB]  # non-receipt photos (selfies etc.) are not kept
+
+
+def test_primary_timeout_falls_back_to_secondary(monkeypatch, sent):
+    receipt = ReceiptData(is_receipt=False, total_amount=0, items=[])
+    analyze = MagicMock(side_effect=[httpx.ReadTimeout("The read operation timed out"), receipt])
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
+
+    _run_task()
+    assert analyze.call_args_list[1].kwargs["model_name"] == tasks.FALLBACK_MODEL
+    assert len(sent) == 1 and "doesn't look like a receipt" in sent[0]
+
+
+@pytest.mark.parametrize("error", [
+    httpx.ReadTimeout("The read operation timed out"),
+    httpx.ConnectTimeout("connect timed out"),
+    httpx.ConnectError("connection refused"),
+    httpx.RemoteProtocolError("server disconnected"),
+    ServerError(500, {"error": {"code": 500, "message": "internal", "status": "INTERNAL"}}),
+    ClientError(429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}}),
+])
+def test_timeouts_and_network_errors_are_retried(monkeypatch, sent, storage, error):
+    analyze = MagicMock(side_effect=error)
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
+    retry = MagicMock(side_effect=RuntimeError("retry scheduled"))
+    monkeypatch.setattr(tasks.process_receipt_task, "retry", retry)
+
+    with pytest.raises(RuntimeError, match="retry scheduled"):
+        _run_task(retries=0)
+    assert analyze.call_count == 2  # primary + fallback before retrying
+    assert retry.called
+    assert all("Something went wrong" not in m for m in sent)
+    assert storage.deleted == []
+
+
+def test_timeouts_after_last_retry_report_overload(monkeypatch, sent, storage):
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=httpx.ReadTimeout("timed out")))
+    result = _run_task(retries=tasks.process_receipt_task.max_retries)
+    assert result["status"] == "failed"
+    assert len(sent) == 1 and "overloaded" in sent[0]
+    assert storage.deleted == [BLOB]
+
+
+def test_time_limits_cover_two_gemini_calls():
+    worst_case_seconds = 2 * tasks.GEMINI_TIMEOUT_MS / 1000
+    assert tasks.process_receipt_task.soft_time_limit > worst_case_seconds
+    assert tasks.process_receipt_task.time_limit > tasks.process_receipt_task.soft_time_limit
 
 
 def test_unexpected_error_does_not_leak_details(monkeypatch, sent, storage):
@@ -170,3 +226,58 @@ def test_task_queued_by_old_bot_version_falls_back_to_chat_id(db, monkeypatch):
 def test_gemini_requests_have_a_timeout():
     assert tasks.ai_client._api_client._http_options.timeout == tasks.GEMINI_TIMEOUT_MS
     assert tasks.process_receipt_task.time_limit and tasks.process_receipt_task.soft_time_limit
+
+
+def test_receipt_with_discount_lines_is_saved_and_counted(db, monkeypatch, storage):
+    from datetime import date
+    from decimal import Decimal
+
+    from db.crud import get_monthly_stats
+    from db.database import AsyncSessionLocal
+
+    receipt = ReceiptData(store_name="Lidl", date=date(2026, 9, 15), currency="CZK", total_amount=17, items=[
+        {"name": "Cheese", "total_price": 10, "category": "Groceries"},
+        {"name": "Cheese discount", "total_price": -3, "category": "Groceries"},
+        {"name": "Wine", "total_price": 30, "category": "Groceries"},
+        {"name": "Lidl Plus coupon", "total_price": -20, "category": "Other"},
+    ])
+    send = AsyncMock()
+    monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+
+    asyncio.run(tasks._process_and_notify_pipeline(CHAT_ID, CHAT_ID, "discount-blob", receipt))
+
+    text = send.call_args.args[1]
+    assert "Cheese discount" in text and "-3.00 CZK" in text
+    assert storage.deleted == []
+
+    async def stats():
+        async with AsyncSessionLocal() as session:
+            return await get_monthly_stats(session, CHAT_ID, 2026, 9)
+
+    total, categories = asyncio.run(stats())
+    assert total == Decimal("17.00")
+    assert dict(categories) == {"Groceries": Decimal("37.00"), "Other": Decimal("-20.00")}
+
+
+def test_gemini_call_disables_function_calling_and_uses_long_timeout(monkeypatch):
+    import io
+
+    from PIL import Image
+
+    generate = MagicMock(return_value=MagicMock(text='{"total_amount": 1, "items": [], "currency": "CZK"}'))
+    monkeypatch.setattr(tasks.ai_client.models, "generate_content", generate)
+
+    image = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(image, format="PNG")
+    tasks.analyze_receipt_with_gemini(image.getvalue())
+
+    config = generate.call_args.kwargs["config"]
+    assert config.automatic_function_calling.disable is True
+    assert tasks.GEMINI_TIMEOUT_MS >= 120_000
+    assert "NEGATIVE total_price" in generate.call_args.kwargs["contents"][1]
+
+
+def test_azure_sdk_request_logging_is_silenced():
+    import logging
+
+    assert logging.getLogger("azure").getEffectiveLevel() >= logging.WARNING

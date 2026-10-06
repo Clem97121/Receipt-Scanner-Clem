@@ -24,6 +24,8 @@ Pillow==12.3.0
 # zoneinfo needs the IANA timezone database, which python:3.12-slim does not ship
 tzdata==2026.5
 google-genai==2.24.0
+# Imported directly to recognize Gemini timeouts and network errors
+httpx==0.28.1
 
 # Database (PostgreSQL)
 # [asyncio] guarantees greenlet is installed (required by sqlalchemy.ext.asyncio)
