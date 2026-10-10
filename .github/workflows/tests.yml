@@ -2,11 +2,11 @@ name: Tests
 
 on:
   pull_request:
-  # Test-only changes on main don't trigger a deploy, so run the suite for them here
   push:
     branches:
       - main
     paths:
+      - 'app/**'
       - 'tests/**'
       - 'pytest.ini'
       - 'requirements-dev.txt'
@@ -21,10 +21,10 @@ jobs:
       contents: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip

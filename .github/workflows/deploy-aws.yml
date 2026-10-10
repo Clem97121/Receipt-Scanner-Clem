@@ -1,0 +1,93 @@
+name: Deploy to AWS Lambda
+
+# Builds the app image, runs DB migrations, then rolls the new image out to the bot functions.
+# Infrastructure itself is changed by a manual "terraform apply" in infra/aws.
+# Needs the repository variable AWS_DEPLOY_ROLE_ARN (terraform output github_deploy_role_arn);
+# until it is set, the deploy job is skipped and only the tests run.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - '.github/workflows/deploy-aws.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-central-1
+  PROJECT: receipt-scanner
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy:
+    needs: tests
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC token for AWS, no long-lived keys
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./app/Dockerfile
+          platforms: linux/amd64
+          push: true
+          # Lambda rejects multi-manifest images, which buildx creates when provenance is on
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run database migrations
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}:${{ github.sha }}
+        run: |
+          aws lambda update-function-code --function-name "$PROJECT-migrate" --image-uri "$IMAGE" > /dev/null
+          aws lambda wait function-updated-v2 --function-name "$PROJECT-migrate"
+          ERROR=$(aws lambda invoke --function-name "$PROJECT-migrate" \
+            --cli-binary-format raw-in-base64-out --payload '{}' \
+            --query FunctionError --output text migrate-result.json)
+          cat migrate-result.json; echo
+          if [ "$ERROR" != "None" ]; then
+            echo "::error::Migrations failed; the bot keeps running the previous image"
+            exit 1
+          fi
+
+      - name: Deploy bot functions
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}:${{ github.sha }}
+        run: |
+          for fn in webhook worker; do
+            aws lambda update-function-code --function-name "$PROJECT-$fn" --image-uri "$IMAGE" > /dev/null
+          done
+          for fn in webhook worker; do
+            aws lambda wait function-updated-v2 --function-name "$PROJECT-$fn"
+          done
+          echo "Deployed $IMAGE"

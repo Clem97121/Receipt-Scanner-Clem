@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,10 +19,10 @@ def telegram_files(tg, monkeypatch):
 
 @pytest.fixture
 def queue(monkeypatch):
-    """Captures receipts queued for the Celery worker."""
-    delay = MagicMock()
-    monkeypatch.setattr(photo_handlers.process_receipt_task, "delay", delay)
-    return delay
+    """Captures receipts queued for the worker Lambda (the real SQS path is tested in test_lambda.py)."""
+    enqueue = AsyncMock()
+    monkeypatch.setattr(photo_handlers, "enqueue_receipt", enqueue)
+    return enqueue
 
 
 async def test_new_photo_is_uploaded_and_queued(tg, telegram_files, queue, storage):
@@ -85,7 +85,7 @@ async def test_already_saved_photo_is_not_processed_again(tg, telegram_files, qu
 
 async def test_storage_failure_is_reported(tg, telegram_files, queue, monkeypatch):
     async def broken_upload(blob_name, data):
-        raise ConnectionError("azure is down")
+        raise ConnectionError("s3 is down")
 
     monkeypatch.setattr(photo_handlers, "upload_receipt_photo", broken_upload)
     sent = texts(await tg.send(OWNER_ID, photo_file_id="new-photo"))

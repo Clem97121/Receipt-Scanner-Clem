@@ -175,7 +175,7 @@ async def test_outsider_still_cannot_touch_family_receipts(tg):
 
 async def test_same_photo_from_family_member_is_a_duplicate(tg, monkeypatch):
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import AsyncMock
 
     import handlers.photo as photo_handlers
     from db.models import Receipt
@@ -186,8 +186,8 @@ async def test_same_photo_from_family_member_is_a_duplicate(tg, monkeypatch):
 
     await make_family(tg)
     monkeypatch.setattr(tg.bot, "get_file", AsyncMock(return_value=SimpleNamespace(file_path="p.jpg")))
-    queue = MagicMock()
-    monkeypatch.setattr(photo_handlers.process_receipt_task, "delay", queue)
+    queue = AsyncMock()
+    monkeypatch.setattr(photo_handlers, "enqueue_receipt", queue)
 
     sent = texts(await tg.send(WIFE_ID, photo_file_id="wife-file-id", photo_unique_id="shared-picture"))
     queue.assert_not_called()

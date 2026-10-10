@@ -1,4 +1,4 @@
-"""Tests for the Celery receipt-processing task. These are sync tests because the task calls asyncio.run itself."""
+"""Tests for receipt processing (run by the worker Lambda). Sync tests: process_receipt calls asyncio.run itself."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,8 +17,9 @@ BLOB = "1/photo.jpg"
 
 
 @pytest.fixture
-def sent(monkeypatch):
-    """Stubs Telegram sending; returns the list of messages sent to the user (storage is faked in conftest)."""
+def sent(monkeypatch, storage):
+    """Seeds the photo in S3 and stubs Telegram sending; returns the list of messages sent to the user."""
+    storage.put_photo(BLOB)
     messages = []
 
     async def fake_send(chat_id, text, reply_markup=None):
@@ -28,50 +29,46 @@ def sent(monkeypatch):
     return messages
 
 
-def _run_task(retries: int = 0):
-    """Runs the task body directly with the given retry counter, as a worker would."""
-    tasks.process_receipt_task.push_request(retries=retries)
-    try:
-        return tasks.process_receipt_task.run(BLOB, CHAT_ID)
-    finally:
-        tasks.process_receipt_task.pop_request()
+def _run(attempt: int = 1):
+    """Processes BLOB as the worker Lambda would on the given SQS receive count."""
+    return tasks.process_receipt(BLOB, CHAT_ID, attempt=attempt)
 
 
 def _overloaded():
     return ServerError(503, {"error": {"code": 503, "message": "overloaded", "status": "UNAVAILABLE"}})
 
 
-def test_503_schedules_retry_while_budget_left(monkeypatch, sent, storage):
+def test_503_asks_for_a_retry_while_attempts_are_left(monkeypatch, sent, storage):
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=_overloaded()))
-    retry = MagicMock(side_effect=RuntimeError("retry scheduled"))
-    monkeypatch.setattr(tasks.process_receipt_task, "retry", retry)
 
-    with pytest.raises(RuntimeError, match="retry scheduled"):
-        _run_task(retries=0)
-    assert retry.call_args.kwargs["countdown"] == tasks.RETRY_COUNTDOWN_SECONDS
+    with pytest.raises(tasks.RetryLater):
+        _run(attempt=1)
     assert len(sent) == 1 and "responding slowly" in sent[0]  # told once, on the first retry
     assert storage.deleted == []  # the photo is still needed for the retry
 
 
-def test_second_retry_does_not_repeat_the_slow_notice(monkeypatch, sent):
+def test_second_attempt_does_not_repeat_the_slow_notice(monkeypatch, sent):
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=_overloaded()))
-    monkeypatch.setattr(tasks.process_receipt_task, "retry", MagicMock(side_effect=RuntimeError("retry scheduled")))
 
-    with pytest.raises(RuntimeError, match="retry scheduled"):
-        _run_task(retries=1)
+    with pytest.raises(tasks.RetryLater):
+        _run(attempt=2)
     assert sent == []
 
 
-def test_503_after_last_retry_notifies_user(monkeypatch, sent, storage):
+def test_503_on_last_attempt_notifies_user(monkeypatch, sent, storage):
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=_overloaded()))
-    retry = MagicMock()
-    monkeypatch.setattr(tasks.process_receipt_task, "retry", retry)
 
-    result = _run_task(retries=tasks.process_receipt_task.max_retries)
+    result = _run(attempt=tasks.MAX_ATTEMPTS)
     assert result["status"] == "failed"
-    retry.assert_not_called()
     assert len(sent) == 1 and "overloaded" in sent[0]
     assert storage.deleted == [BLOB]
+    assert BLOB not in storage.keys()
+
+
+def test_redelivery_beyond_max_attempts_is_still_final(monkeypatch, sent):
+    # e.g. a Lambda timeout made SQS deliver the message once more than planned
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=_overloaded()))
+    assert _run(attempt=tasks.MAX_ATTEMPTS + 1)["status"] == "failed"
 
 
 def test_primary_model_503_falls_back_to_secondary(monkeypatch, sent, storage):
@@ -79,7 +76,7 @@ def test_primary_model_503_falls_back_to_secondary(monkeypatch, sent, storage):
     analyze = MagicMock(side_effect=[_overloaded(), receipt])
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
 
-    _run_task()
+    _run()
     assert analyze.call_args_list[1].kwargs["model_name"] == tasks.FALLBACK_MODEL
     assert len(sent) == 1 and "doesn't look like a receipt" in sent[0]
     assert storage.deleted == [BLOB]  # non-receipt photos (selfies etc.) are not kept
@@ -90,9 +87,18 @@ def test_primary_timeout_falls_back_to_secondary(monkeypatch, sent):
     analyze = MagicMock(side_effect=[httpx.ReadTimeout("The read operation timed out"), receipt])
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
 
-    _run_task()
+    _run()
     assert analyze.call_args_list[1].kwargs["model_name"] == tasks.FALLBACK_MODEL
     assert len(sent) == 1 and "doesn't look like a receipt" in sent[0]
+
+
+def test_photo_is_read_from_s3(monkeypatch, sent, storage):
+    storage.put_photo(BLOB, b"real-jpeg-bytes")
+    analyze = MagicMock(return_value=ReceiptData(is_receipt=False, total_amount=0, items=[]))
+    monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
+
+    _run()
+    assert analyze.call_args.args[0] == b"real-jpeg-bytes"
 
 
 @pytest.mark.parametrize("error", [
@@ -106,44 +112,43 @@ def test_primary_timeout_falls_back_to_secondary(monkeypatch, sent):
 def test_timeouts_and_network_errors_are_retried(monkeypatch, sent, storage, error):
     analyze = MagicMock(side_effect=error)
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", analyze)
-    retry = MagicMock(side_effect=RuntimeError("retry scheduled"))
-    monkeypatch.setattr(tasks.process_receipt_task, "retry", retry)
 
-    with pytest.raises(RuntimeError, match="retry scheduled"):
-        _run_task(retries=0)
+    with pytest.raises(tasks.RetryLater):
+        _run(attempt=1)
     assert analyze.call_count == 2  # primary + fallback before retrying
-    assert retry.called
     assert all("Something went wrong" not in m for m in sent)
     assert storage.deleted == []
 
 
-def test_timeouts_after_last_retry_report_overload(monkeypatch, sent, storage):
+def test_timeouts_on_last_attempt_report_overload(monkeypatch, sent, storage):
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=httpx.ReadTimeout("timed out")))
-    result = _run_task(retries=tasks.process_receipt_task.max_retries)
+    result = _run(attempt=tasks.MAX_ATTEMPTS)
     assert result["status"] == "failed"
     assert len(sent) == 1 and "overloaded" in sent[0]
     assert storage.deleted == [BLOB]
 
 
-def test_time_limits_cover_two_gemini_calls():
-    worst_case_seconds = 2 * tasks.GEMINI_TIMEOUT_MS / 1000
-    assert tasks.process_receipt_task.soft_time_limit > worst_case_seconds
-    assert tasks.process_receipt_task.time_limit > tasks.process_receipt_task.soft_time_limit
-
-
 def test_unexpected_error_does_not_leak_details(monkeypatch, sent, storage):
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini",
                         MagicMock(side_effect=RuntimeError("password=hunter2 at db-host")))
-    _run_task()
+    _run()
     assert len(sent) == 1
     assert "hunter2" not in sent[0] and "db-host" not in sent[0]
     assert storage.deleted == []  # the receipt may already be saved, so the photo is kept
 
 
+def test_missing_photo_is_reported_without_retry(monkeypatch, storage):
+    send = AsyncMock()
+    monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+    result = tasks.process_receipt("1/never-uploaded.jpg", CHAT_ID)
+    assert result["status"] == "failed"
+    assert "Something went wrong" in send.call_args.args[1]
+
+
 def test_api_error_does_not_leak_details(monkeypatch, sent, storage):
     error = ClientError(400, {"error": {"code": 400, "message": "secret-request-id-42", "status": "INVALID_ARGUMENT"}})
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(side_effect=error))
-    _run_task()
+    _run()
     assert len(sent) == 1 and "secret-request-id-42" not in sent[0]
     assert storage.deleted == [BLOB]
 
@@ -188,36 +193,30 @@ def test_successful_receipt_is_saved_and_sent_with_keyboard(db, monkeypatch, sto
     assert storage.deleted == []
 
 
-def test_group_receipt_is_saved_for_the_sender_and_reply_goes_to_the_group(db, monkeypatch):
+def test_group_receipt_is_saved_for_the_sender_and_reply_goes_to_the_group(db, monkeypatch, storage):
     receipt = ReceiptData(store_name="Shop", currency="CZK", total_amount=1, items=[
         {"name": "milk", "total_price": 1, "category": "Groceries"},
     ])
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(return_value=receipt))
     send = AsyncMock()
     monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+    storage.put_photo("1/group-photo.jpg")
 
-    tasks.process_receipt_task.push_request(retries=0)
-    try:
-        tasks.process_receipt_task.run("1/group-photo.jpg", -100500, 1)
-    finally:
-        tasks.process_receipt_task.pop_request()
+    tasks.process_receipt("1/group-photo.jpg", -100500, 1)
 
     assert send.call_args.args[0] == -100500
     receipt_id = int(send.call_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data.split(":")[1])
     assert asyncio.run(load_receipt(receipt_id)).user_id == 1
 
 
-def test_task_queued_by_old_bot_version_falls_back_to_chat_id(db, monkeypatch):
+def test_message_without_user_id_falls_back_to_chat_id(db, monkeypatch, storage):
     receipt = ReceiptData(currency="CZK", total_amount=1, items=[])
     monkeypatch.setattr(tasks, "analyze_receipt_with_gemini", MagicMock(return_value=receipt))
     send = AsyncMock()
     monkeypatch.setattr(tasks, "_send_telegram_msg", send)
+    storage.put_photo("1/old-task.jpg")
 
-    tasks.process_receipt_task.push_request(retries=0)
-    try:
-        tasks.process_receipt_task.run("1/old-task.jpg", 1)
-    finally:
-        tasks.process_receipt_task.pop_request()
+    tasks.process_receipt("1/old-task.jpg", 1)
 
     receipt_id = int(send.call_args.kwargs["reply_markup"].inline_keyboard[0][0].callback_data.split(":")[1])
     assert asyncio.run(load_receipt(receipt_id)).user_id == 1
@@ -225,7 +224,6 @@ def test_task_queued_by_old_bot_version_falls_back_to_chat_id(db, monkeypatch):
 
 def test_gemini_requests_have_a_timeout():
     assert tasks.ai_client._api_client._http_options.timeout == tasks.GEMINI_TIMEOUT_MS
-    assert tasks.process_receipt_task.time_limit and tasks.process_receipt_task.soft_time_limit
 
 
 def test_receipt_with_discount_lines_is_saved_and_counted(db, monkeypatch, storage):
@@ -275,9 +273,3 @@ def test_gemini_call_disables_function_calling_and_uses_long_timeout(monkeypatch
     assert config.automatic_function_calling.disable is True
     assert tasks.GEMINI_TIMEOUT_MS >= 120_000
     assert "NEGATIVE total_price" in generate.call_args.kwargs["contents"][1]
-
-
-def test_azure_sdk_request_logging_is_silenced():
-    import logging
-
-    assert logging.getLogger("azure").getEffectiveLevel() >= logging.WARNING

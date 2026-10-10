@@ -6,8 +6,8 @@ from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
 from db.migrations import run_migrations
+from fsm_storage import DatabaseStorage
 from handlers import get_routers
-from storage import ensure_container_exists
 
 load_dotenv()
 
@@ -16,17 +16,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("ERROR: Bot token not found! Check your .env file")
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# FSM state lives in the DB: on Lambda every update may be handled by a fresh process
+dp = Dispatcher(storage=DatabaseStorage())
 dp.include_routers(*get_routers())
 
 
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    # The Azure SDK logs every HTTP request with all headers at INFO level
-    logging.getLogger("azure").setLevel(logging.WARNING)
+def create_bot() -> Bot:
+    """Creates a Bot whose HTTP session belongs to the current event loop; close bot.session when done."""
+    return Bot(token=BOT_TOKEN)
 
-    ensure_container_exists()
+
+bot = create_bot()
+
+
+async def main():
+    """Local development only: long polling. Production runs on Lambda via a webhook (lambda_handlers.webhook).
+
+    Telegram refuses polling while a webhook is set, so use a separate test bot token locally.
+    """
+    logging.basicConfig(level=logging.INFO)
+
     await asyncio.to_thread(run_migrations)
 
     logging.info("Bot started!")

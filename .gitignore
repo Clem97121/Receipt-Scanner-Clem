@@ -225,6 +225,8 @@ __marimo__/
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfplan
+tfplan
 .terraform.lock.hcl
 terraform.tfvars
 

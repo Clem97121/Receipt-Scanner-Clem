@@ -2,10 +2,8 @@ import asyncio
 import os
 
 from alembic import context
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
-from db.database import Base
+from db.database import Base, make_engine, normalize_database_url
 import db.models  # noqa: F401  (registers the models on Base.metadata)
 
 config = context.config
@@ -23,7 +21,7 @@ def get_database_url() -> str:
 def run_migrations_offline() -> None:
     """Generates SQL without connecting to the database (alembic upgrade --sql)."""
     context.configure(
-        url=get_database_url(),
+        url=normalize_database_url(get_database_url())[0],
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -46,7 +44,7 @@ def _run_migrations(connection) -> None:
 
 async def run_migrations_online() -> None:
     """Applies migrations over an async connection (asyncpg in production)."""
-    engine = create_async_engine(get_database_url(), poolclass=NullPool)
+    engine = make_engine(get_database_url())
     try:
         async with engine.connect() as connection:
             await connection.run_sync(_run_migrations)

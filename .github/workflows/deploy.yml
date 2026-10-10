@@ -1,13 +1,9 @@
 name: Build and Deploy to K3s via Helm
 
+# Legacy Azure/K3s deploy. The app now targets AWS Lambda (no Celery, Redis or Azure Blob),
+# so this must not run on push anymore; it is kept, manual-only, until the AWS cutover.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'app/**'
-      - 'helm/**'
-      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
 
 jobs:
   tests:

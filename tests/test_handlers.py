@@ -1,6 +1,5 @@
 from aiogram.methods import EditMessageText
 
-import storage as storage_module
 from conftest import ITEM_ID, OWNER_ID, RECEIPT_ID, STRANGER_ID, load_receipt, texts
 from db.database import AsyncSessionLocal
 from db.models import Receipt
@@ -59,10 +58,10 @@ async def test_stranger_cannot_delete_receipt_or_photo(tg, storage):
 
 
 async def test_storage_failure_does_not_block_deletion(tg, storage, monkeypatch):
-    def broken_get_blob_client(container, blob):
-        raise ConnectionError("azure is down")
+    def broken_delete(**kwargs):
+        raise ConnectionError("s3 is down")
 
-    monkeypatch.setattr(storage_module.blob_service_client, "get_blob_client", broken_get_blob_client)
+    monkeypatch.setattr(storage, "delete_object", broken_delete)
     sent = texts(await tg.click(OWNER_ID, f"delete_receipt:{RECEIPT_ID}"))
     assert any("deleted" in t for t in sent)
     async with AsyncSessionLocal() as session:

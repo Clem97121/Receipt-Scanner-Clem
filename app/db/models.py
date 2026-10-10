@@ -1,7 +1,7 @@
 from datetime import datetime, date
 from decimal import Decimal
 from typing import List, Optional
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from db.database import Base
 
@@ -111,3 +111,15 @@ class ReceiptItem(Base):
     category: Mapped[str] = mapped_column(String(64), default="Other", index=True)
 
     receipt: Mapped["Receipt"] = relationship(back_populates="items")
+
+
+class FsmState(Base):
+    """Telegram conversation state (aiogram FSM), stored in the DB because Lambda keeps no memory between calls."""
+    __tablename__ = "fsm_states"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    state: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    data: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

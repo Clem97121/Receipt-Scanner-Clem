@@ -4,9 +4,6 @@ import logging
 import os
 
 import httpx
-from azure.core.exceptions import ResourceNotFoundError
-from azure.storage.blob import BlobServiceClient
-from celery import Celery
 from dotenv import load_dotenv
 from aiogram import Bot
 from google import genai
@@ -18,36 +15,36 @@ from sqlalchemy.exc import IntegrityError
 from db.database import AsyncSessionLocal, engine
 from db.crud import save_receipt_to_db
 from schemas import ReceiptData
+from storage import delete_photo_sync, download_photo_sync
 
 from formatting import format_receipt_text
 from keyboards import get_receipt_inline_keyboard
 
 load_dotenv()
 
-# The Azure SDK logs every HTTP request with all headers at INFO level
-logging.getLogger("azure").setLevel(logging.WARNING)
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "receipts")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 PRIMARY_MODEL = "gemini-3.5-flash-lite"
 FALLBACK_MODEL = "gemini-3.5-flash"
 
-celery_app = Celery("receipt_tasks", broker=REDIS_URL, backend=REDIS_URL)
-
-blob_service_client = BlobServiceClient.from_connection_string(
-    AZURE_STORAGE_CONNECTION_STRING
-)
 # Without a timeout a hung Gemini request would block the worker forever.
 # Successful calls already take up to ~50s when several run in parallel, so leave headroom.
 GEMINI_TIMEOUT_MS = 120_000
 
 # HTTP status codes from Gemini that mean "try again later"
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
+# A receipt is attempted up to MAX_ATTEMPTS times (SQS receive count); retries start RETRY_DELAY_SECONDS later.
+# The queue's maxReceiveCount must be larger, so the last attempt can still tell the user what happened.
+MAX_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 10
+
 ai_client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS))
+
+
+class RetryLater(Exception):
+    """Raised when the AI failed transiently and the receipt should be processed again later."""
 
 
 def analyze_receipt_with_gemini(image_bytes: bytes, model_name: str = PRIMARY_MODEL) -> ReceiptData:
@@ -109,8 +106,8 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
     bot = Bot(token=BOT_TOKEN)
     try:
         await bot.send_message(
-            chat_id=chat_id, 
-            text=text, 
+            chat_id=chat_id,
+            text=text,
             parse_mode="HTML",
             reply_markup=reply_markup
         )
@@ -120,13 +117,8 @@ async def _send_telegram_msg(chat_id: int, text: str, reply_markup=None):
 
 def _delete_unsaved_photo(blob_name: str) -> None:
     """Deletes a photo that will never be linked to a saved receipt; failures are logged, not raised."""
-    try:
-        blob_service_client.get_blob_client(container=AZURE_CONTAINER_NAME, blob=blob_name).delete_blob()
-        logging.info(f"[Celery Worker] Deleted unsaved photo: {blob_name}")
-    except ResourceNotFoundError:
-        pass
-    except Exception:
-        logging.exception(f"[Celery Worker] Failed to delete unsaved photo: {blob_name}")
+    delete_photo_sync(blob_name)
+    logging.info(f"[Worker] Deleted unsaved photo: {blob_name}")
 
 
 async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: str, receipt: ReceiptData):
@@ -134,9 +126,9 @@ async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: st
     try:
         # 1. Check if image is actually a receipt
         if not receipt.is_receipt:
-            logging.warning(f"[Celery Worker] Image is not a receipt for chat {chat_id}")
+            logging.warning(f"[Worker] Image is not a receipt for chat {chat_id}")
             await _send_telegram_msg(
-                chat_id, 
+                chat_id,
                 "❌ <b>This doesn't look like a receipt!</b>\n\n"
                 "Please send a clear photo of a purchase receipt or store bill."
             )
@@ -146,7 +138,7 @@ async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: st
         # 2. Reject numbers that are impossible or would not fit the DB columns
         problems = receipt.find_problems()
         if problems:
-            logging.warning(f"[Celery Worker] Unreliable AI output for blob {blob_name}: {problems}")
+            logging.warning(f"[Worker] Unreliable AI output for blob {blob_name}: {problems}")
             await _send_telegram_msg(
                 chat_id,
                 "⚠️ <b>I couldn't read the amounts on this receipt reliably.</b>\n\n"
@@ -165,12 +157,12 @@ async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: st
                     blob_name=blob_name,
                     receipt_data=receipt,
                 )
-            logging.info(f"[Celery Worker] Saved receipt to DB for user {user_id}")
+            logging.info(f"[Worker] Saved receipt to DB for user {user_id}")
 
         except IntegrityError:
-            logging.warning(f"[Celery Worker] Duplicate receipt detected for blob: {blob_name}")
+            logging.warning(f"[Worker] Duplicate receipt detected for blob: {blob_name}")
             await _send_telegram_msg(
-                chat_id, 
+                chat_id,
                 "⚠️ <b>This receipt has already been processed and saved!</b>"
             )
             return
@@ -190,42 +182,33 @@ async def _process_and_notify_pipeline(chat_id: int, user_id: int, blob_name: st
         await engine.dispose()
 
 
-RETRY_COUNTDOWN_SECONDS = 10
-
-
-# Worst case per attempt: two Gemini calls (primary + fallback) at GEMINI_TIMEOUT_MS each, plus download and saving
-@celery_app.task(bind=True, max_retries=2, soft_time_limit=300, time_limit=330)
-def process_receipt_task(self, blob_name: str, chat_id: int, user_id: int | None = None):
+def process_receipt(blob_name: str, chat_id: int, user_id: int | None = None, attempt: int = 1) -> dict:
     """Recognizes a receipt photo and saves it for user_id; replies go to chat_id.
 
-    user_id defaults to chat_id for tasks queued by older bot versions (private chats only).
+    attempt is 1-based (the SQS receive count). Raises RetryLater when the AI failed transiently
+    and attempts are left; every other outcome, including failures, is final and already reported to the user.
+    user_id defaults to chat_id for messages queued without it (private chats only).
     """
     user_id = user_id or chat_id
-    logging.info(f"[Celery Worker] Starting Gemini analysis for: {blob_name}")
+    logging.info(f"[Worker] Starting Gemini analysis for: {blob_name} (attempt {attempt}/{MAX_ATTEMPTS})")
 
     try:
-        # 1. Download image from Azure Blob Storage
-        blob_client = blob_service_client.get_blob_client(
-            container=AZURE_CONTAINER_NAME, blob=blob_name
-        )
-        download_stream = blob_client.download_blob()
-        image_bytes = download_stream.readall()
+        # 1. Download image from S3
+        image_bytes = download_photo_sync(blob_name)
 
         # 2. Try the primary model first, the fallback model on overload/timeouts
         receipt = analyze_with_fallback(image_bytes)
 
         # 3. Run entire DB + Telegram async flow in ONE single event loop
         asyncio.run(_process_and_notify_pipeline(chat_id, user_id, blob_name, receipt))
-        
-        logging.info(f"[Celery Worker] Task completed for chat {chat_id}")
+
+        logging.info(f"[Worker] Task completed for chat {chat_id}")
         return {"status": "completed", "blob_name": blob_name}
 
     except Exception as e:
         if is_transient_ai_error(e):
-            # self.retry() re-raises the original exception once retries are exhausted,
-            # so check the retry budget explicitly before scheduling another attempt.
-            if self.request.retries >= self.max_retries:
-                logging.error(f"[Celery Worker] Retries exhausted, Fast Fail triggered for blob: {blob_name}")
+            if attempt >= MAX_ATTEMPTS:
+                logging.error(f"[Worker] Attempts exhausted, Fast Fail triggered for blob: {blob_name}")
                 error_msg = (
                     "⚠️ <b>The AI servers are currently overloaded</b>\n\n"
                     "Unable to recognize the receipt after several attempts. "
@@ -235,18 +218,18 @@ def process_receipt_task(self, blob_name: str, chat_id: int, user_id: int | None
                 _delete_unsaved_photo(blob_name)
                 return {"status": "failed", "blob_name": blob_name}
 
-            if self.request.retries == 0:
+            if attempt == 1:
                 asyncio.run(_send_telegram_msg(
                     chat_id, "⏳ The AI is responding slowly right now, still trying to recognize your receipt..."
                 ))
             logging.warning(
                 f"[Gemini] Both models failed ({type(e).__name__}). "
-                f"Retry {self.request.retries + 1}/{self.max_retries} in {RETRY_COUNTDOWN_SECONDS}s..."
+                f"Retry {attempt + 1}/{MAX_ATTEMPTS} in {RETRY_DELAY_SECONDS}s..."
             )
-            raise self.retry(exc=e, countdown=RETRY_COUNTDOWN_SECONDS)
+            raise RetryLater(str(e)) from e
 
         if isinstance(e, APIError):
-            logging.exception(f"[Celery Worker] Gemini API error for blob: {blob_name}")
+            logging.exception(f"[Worker] Gemini API error for blob: {blob_name}")
             asyncio.run(_send_telegram_msg(
                 chat_id, "❌ The AI service failed to process your receipt. Please try again later."
             ))
@@ -254,7 +237,8 @@ def process_receipt_task(self, blob_name: str, chat_id: int, user_id: int | None
             return {"status": "failed", "blob_name": blob_name}
 
         # The failure may have happened after the receipt was saved, so the photo is kept
-        logging.exception(f"[Celery Worker] Unexpected processing error for blob: {blob_name}")
+        logging.exception(f"[Worker] Unexpected processing error for blob: {blob_name}")
         asyncio.run(_send_telegram_msg(
             chat_id, "❌ Something went wrong while processing your receipt. Please try again later."
         ))
+        return {"status": "failed", "blob_name": blob_name}

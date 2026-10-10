@@ -1,4 +1,4 @@
-"""Shared test setup: fake environment, SQLite database and an offline Telegram session.
+"""Shared test setup: fake environment, SQLite database, in-memory AWS (moto) and an offline Telegram session.
 
 Environment variables must be set before any app module is imported,
 because bot.py, tasks.py and db/database.py read them at import time.
@@ -6,20 +6,29 @@ because bot.py, tasks.py and db/database.py read them at import time.
 import os
 import tempfile
 import time
-from unittest.mock import MagicMock
 
 _TMP_DIR = tempfile.mkdtemp(prefix="receipt-tests-")
+AWS_REGION = "eu-central-1"
+PHOTOS_BUCKET = "test-receipt-photos"
+QUEUE_NAME = "test-receipts"
 os.environ.update(
     BOT_TOKEN="123456:TEST-TOKEN-TEST-TOKEN-TEST-TOKEN",
-    AZURE_STORAGE_CONNECTION_STRING=(
-        "DefaultEndpointsProtocol=https;AccountName=test;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net"
-    ),
     GEMINI_API_KEY="test-key",
-    REDIS_URL="redis://localhost:6379/0",
     DATABASE_URL="sqlite+aiosqlite:///" + os.path.join(_TMP_DIR, "test.db").replace("\\", "/"),
+    WEBHOOK_SECRET="test-webhook-secret",
+    PHOTOS_BUCKET=PHOTOS_BUCKET,
+    # moto's default account id is 123456789012
+    RECEIPTS_QUEUE_URL=f"https://sqs.{AWS_REGION}.amazonaws.com/123456789012/{QUEUE_NAME}",
+    AWS_DEFAULT_REGION=AWS_REGION,
+    AWS_ACCESS_KEY_ID="testing",
+    AWS_SECRET_ACCESS_KEY="testing",
 )
+os.environ.pop("SSM_PARAMETER_PREFIX", None)
 
+# moto must be imported before boto3 clients are created (storage.py and receipt_queue.py create them at import)
+import boto3
 import pytest
+from moto import mock_aws
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.methods import GetMe, SendMessage
@@ -143,30 +152,73 @@ async def load_receipt(receipt_id: int) -> Receipt:
         return (await session.execute(stmt)).scalar_one()
 
 
-class FakeStorage:
-    """In-memory stand-in for Azure Blob Storage that records uploads and deletions."""
+class RecordingS3:
+    """Wraps the moto S3 client and records which photo keys were uploaded and deleted."""
 
-    def __init__(self):
+    def __init__(self, client):
+        self.client = client
         self.uploaded = []
         self.deleted = []
 
-    def get_blob_client(self, container: str, blob: str):
-        client = MagicMock()
-        client.download_blob.return_value.readall.return_value = b"image-bytes"
-        client.upload_blob.side_effect = lambda *args, **kwargs: self.uploaded.append(blob)
-        client.delete_blob.side_effect = lambda *args, **kwargs: self.deleted.append(blob)
-        return client
+    def put_object(self, **kwargs):
+        self.uploaded.append(kwargs["Key"])
+        return self.client.put_object(**kwargs)
+
+    def delete_object(self, **kwargs):
+        self.deleted.append(kwargs["Key"])
+        return self.client.delete_object(**kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def put_photo(self, key: str, data: bytes = b"image-bytes") -> None:
+        """Seeds a photo without recording it as an upload made by the app."""
+        self.client.put_object(Bucket=PHOTOS_BUCKET, Key=key, Body=data)
+
+    def keys(self) -> list[str]:
+        return [obj["Key"] for obj in self.client.list_objects_v2(Bucket=PHOTOS_BUCKET).get("Contents", [])]
+
+
+@pytest.fixture(scope="session")
+def _aws_session():
+    """In-memory AWS for the whole run (starting moto per test is slow); no test talks to real AWS."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name=AWS_REGION)
+        s3.create_bucket(Bucket=PHOTOS_BUCKET, CreateBucketConfiguration={"LocationConstraint": AWS_REGION})
+        sqs = boto3.client("sqs", region_name=AWS_REGION)
+        sqs.create_queue(QueueName=QUEUE_NAME)
+        yield {"s3": s3, "sqs": sqs, "ssm": boto3.client("ssm", region_name=AWS_REGION)}
 
 
 @pytest.fixture(autouse=True)
-def storage(monkeypatch):
-    """Replaces Azure Blob Storage in the bot and the worker so no test talks to the real service."""
-    fake = FakeStorage()
+def aws(_aws_session):
+    """Empty S3 bucket, SQS queue and SSM parameters for every test."""
+    yield _aws_session
+    s3, sqs, ssm = _aws_session["s3"], _aws_session["sqs"], _aws_session["ssm"]
+    for obj in s3.list_objects_v2(Bucket=PHOTOS_BUCKET).get("Contents", []):
+        s3.delete_object(Bucket=PHOTOS_BUCKET, Key=obj["Key"])
+    sqs.purge_queue(QueueUrl=os.environ["RECEIPTS_QUEUE_URL"])
+    names = [p["Name"] for p in ssm.describe_parameters().get("Parameters", [])]
+    if names:
+        ssm.delete_parameters(Names=names)
+
+
+@pytest.fixture(autouse=True)
+def storage(aws, monkeypatch):
+    """The app's S3 client, recording uploads and deletions."""
     import storage as storage_module
-    import tasks
-    for module in (storage_module, tasks):
-        monkeypatch.setattr(module.blob_service_client, "get_blob_client", fake.get_blob_client)
-    return fake
+
+    recorder = RecordingS3(aws["s3"])
+    monkeypatch.setattr(storage_module, "s3", recorder)
+    return recorder
+
+
+def queued_receipts(aws) -> list[dict]:
+    """Returns the bodies of all messages waiting in the receipts queue."""
+    import json
+
+    response = aws["sqs"].receive_message(QueueUrl=os.environ["RECEIPTS_QUEUE_URL"], MaxNumberOfMessages=10)
+    return [json.loads(message["Body"]) for message in response.get("Messages", [])]
 
 
 @pytest.fixture
@@ -198,7 +250,6 @@ async def db():
 
 @pytest.fixture
 async def tg(db):
-    """Telegram harness with a clean FSM storage."""
+    """Telegram harness; FSM state lives in the DB, which the db fixture recreates for every test."""
     harness = TelegramHarness()
-    harness.dp.storage.storage.clear()
     yield harness

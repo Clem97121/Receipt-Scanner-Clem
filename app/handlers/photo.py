@@ -1,4 +1,3 @@
-import asyncio
 import io
 import logging
 
@@ -10,7 +9,7 @@ from db.family import ensure_user
 from handlers.cards import receipt_card
 from keyboards import get_receipt_inline_keyboard
 from storage import upload_receipt_photo
-from tasks import process_receipt_task
+from receipt_queue import enqueue_receipt
 
 router = Router(name="photo")
 
@@ -48,10 +47,10 @@ async def handle_photo(message: types.Message):
         await message.bot.download_file(file_info.file_path, destination=file_bytes)
 
         await upload_receipt_photo(blob_name, file_bytes.getvalue())
-        await asyncio.to_thread(process_receipt_task.delay, blob_name, message.chat.id, user_id)
+        await enqueue_receipt(blob_name, message.chat.id, user_id)
 
         await message.answer(
-            "✅ Photo uploaded to Azure Blob Storage successfully!\n"
+            "✅ Photo received!\n"
             "• Processing with AI...",
             parse_mode="HTML",
         )
